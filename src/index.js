@@ -11,7 +11,6 @@ async function main() {
 
   while (true) {
     await Waze.fetchWazeAlerts();
-    // Fetch Waze alerts every 10 minutes
     // Fetch Speed Camera information every month
     // Update Grid storage every 24 hours
 
