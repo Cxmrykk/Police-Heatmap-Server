@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const Waze = require("./waze");
 const SpeedCameras = require("./speed-cameras");
 const Grid = require("./grid");
@@ -8,6 +10,7 @@ async function main() {
   let lastMs = new Date().getTime();
 
   while (true) {
+    await Waze.fetchWazeAlerts();
     // Fetch Waze alerts every 10 minutes
     // Fetch Speed Camera information every month
     // Update Grid storage every 24 hours
