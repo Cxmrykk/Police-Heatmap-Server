@@ -136,4 +136,4 @@ dist
 .pnp.*
 
 # Cache directory
-./cache
+cache
