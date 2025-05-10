@@ -1,10 +1,11 @@
 const express = require("express");
 const Database = require("better-sqlite3");
 const Path = require("path");
+const config = require("./config");
 
-const CACHE_DIR_PATH = process.env.HEATMAP_CACHE_DIR_PATH;
-const DB_FILENAME = "alerts.sqlite";
-const API_PORT = process.env.API_PORT || 3000;
+const CACHE_DIR_PATH = config.HEATMAP_CACHE_DIR_PATH;
+const DB_FILENAME = config.DB_FILENAME;
+const API_PORT = config.API_PORT;
 const MAX_PRECISION_LEVEL = 5;
 
 let db;
@@ -21,13 +22,14 @@ function getFloatCoordinateFromScaled(scaledCoord, precision) {
 }
 
 function startServer() {
-  if (!CACHE_DIR_PATH) {
-    console.error("FATAL: HEATMAP_CACHE_DIR_PATH environment variable is not set for the server.");
-    process.exit(1);
-  }
   const dbPath = Path.join(CACHE_DIR_PATH, DB_FILENAME);
   // Open in readonly mode, ensure file exists (grid.js or waze.js should have created it)
-  db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  } catch (error) {
+    console.error(`FATAL: Could not open database at ${dbPath}. Ensure it's created by the data processing scripts. Error: ${error.message}`);
+    process.exit(1);
+  }
 
   const app = express();
   app.use(express.json());
@@ -77,12 +79,13 @@ function startServer() {
       }));
       res.json(formattedResults);
     } catch (error) {
+      console.error("Error retrieving density data:", error);
       res.status(500).json({ error: "Failed to retrieve density data" });
     }
   });
 
   app.listen(API_PORT, () => {
-    // No logging
+    console.log(`API Server listening on port ${API_PORT}`);
   });
 }
 

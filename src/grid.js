@@ -1,11 +1,12 @@
 const Database = require("better-sqlite3");
 const Path = require("path");
+const config = require("./config");
 
 // Core configuration
 const PRECISION = { MAX: 5, MIN: 0 };
 const DAY_MS = 86400000; // 24h in milliseconds
-const CACHE_DIR = process.env.HEATMAP_CACHE_DIR_PATH;
-const DB_FILE = "alerts.sqlite";
+const CACHE_DIR = config.HEATMAP_CACHE_DIR_PATH;
+const DB_FILE = config.DB_FILENAME;
 
 // Time window definitions
 const TIME_WINDOWS = [
@@ -42,11 +43,6 @@ function getMinMax(values) {
 }
 
 async function generateHeatmapData() {
-  if (!CACHE_DIR) {
-    console.error("FATAL: HEATMAP_CACHE_DIR_PATH environment variable is not set.");
-    process.exit(1);
-  }
-
   const db = new Database(Path.join(CACHE_DIR, DB_FILE));
   initializeDatabase(db);
 

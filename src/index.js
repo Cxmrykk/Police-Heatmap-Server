@@ -1,4 +1,5 @@
 require("dotenv").config();
+require("./config");
 
 const Waze = require("./waze");
 // const SpeedCameras = require("./speed-cameras");

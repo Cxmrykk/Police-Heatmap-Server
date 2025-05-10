@@ -1,21 +1,17 @@
 const Database = require("better-sqlite3");
 const Path = require("path");
 const Axios = require("axios");
+const config = require("./config");
 
-// Configuration
-const MAX_ALERTS = parseInt(process.env.WAZE_MAX_ALERTS);
-const AREA_TOP = parseFloat(process.env.WAZE_AREA_TOP);
-const AREA_BOTTOM = parseFloat(process.env.WAZE_AREA_BOTTOM);
-const AREA_LEFT = parseFloat(process.env.WAZE_AREA_LEFT);
-const AREA_RIGHT = parseFloat(process.env.WAZE_AREA_RIGHT);
-const QUERY_DELAY_MS = parseInt(process.env.WAZE_QUERY_DELAY_MS);
-const CACHE_DIR_PATH = process.env.HEATMAP_CACHE_DIR_PATH;
-const DB_FILENAME = "alerts.sqlite";
-
-if (!CACHE_DIR_PATH || [AREA_TOP, AREA_BOTTOM, AREA_LEFT, AREA_RIGHT, MAX_ALERTS, QUERY_DELAY_MS].some(isNaN)) {
-  console.error("FATAL: Missing or invalid required environment variables. Ensure WAZE_MAX_ALERTS, WAZE_AREA_TOP, WAZE_AREA_BOTTOM, WAZE_AREA_LEFT, WAZE_AREA_RIGHT, WAZE_QUERY_DELAY_MS, HEATMAP_CACHE_DIR_PATH are set correctly.");
-  process.exit(1);
-}
+// Configuration (now from config module)
+const MAX_ALERTS = config.WAZE_MAX_ALERTS;
+const AREA_TOP = config.WAZE_AREA_TOP;
+const AREA_BOTTOM = config.WAZE_AREA_BOTTOM;
+const AREA_LEFT = config.WAZE_AREA_LEFT;
+const AREA_RIGHT = config.WAZE_AREA_RIGHT;
+const QUERY_DELAY_MS = config.WAZE_QUERY_DELAY_MS;
+const CACHE_DIR_PATH = config.HEATMAP_CACHE_DIR_PATH;
+const DB_FILENAME = config.DB_FILENAME;
 
 // Database
 const dbPath = Path.join(CACHE_DIR_PATH, DB_FILENAME);
@@ -37,7 +33,7 @@ async function getData(top, bottom, left, right) {
     const response = await Axios.get(`https://www.waze.com/live-map/api/georss?top=${top}&bottom=${bottom}&left=${left}&right=${right}&env=row&types=alerts`);
     return response.data;
   } catch (error) {
-    console.error(`API Request Error: ${error.message} for area T:${top},B:${bottom},L:${left},R:${right}`); // Minimal logging
+    console.error(`API Request Error: ${error.message} for area T:${top},B:${bottom},L:${left},R:${right}`);
     return null;
   }
 }
