@@ -10,6 +10,7 @@ const AREA_LEFT = parseFloat(process.env.WAZE_AREA_LEFT);
 const AREA_RIGHT = parseFloat(process.env.WAZE_AREA_RIGHT);
 const QUERY_DELAY_MS = parseInt(process.env.WAZE_QUERY_DELAY_MS);
 const CACHE_DIR_PATH = process.env.HEATMAP_CACHE_DIR_PATH;
+const DB_FILENAME = "alerts.sqlite";
 
 if (!CACHE_DIR_PATH || [AREA_TOP, AREA_BOTTOM, AREA_LEFT, AREA_RIGHT, MAX_ALERTS, QUERY_DELAY_MS].some(isNaN)) {
   console.error("FATAL: Missing or invalid required environment variables. Ensure WAZE_MAX_ALERTS, WAZE_AREA_TOP, WAZE_AREA_BOTTOM, WAZE_AREA_LEFT, WAZE_AREA_RIGHT, WAZE_QUERY_DELAY_MS, HEATMAP_CACHE_DIR_PATH are set correctly.");
@@ -17,9 +18,11 @@ if (!CACHE_DIR_PATH || [AREA_TOP, AREA_BOTTOM, AREA_LEFT, AREA_RIGHT, MAX_ALERTS
 }
 
 // Database
-const db = new Database(Path.join(CACHE_DIR_PATH, "alerts.db"));
+const dbPath = Path.join(CACHE_DIR_PATH, DB_FILENAME);
+const db = new Database(dbPath);
 db.pragma("journal_mode = WAL");
 db.exec(`CREATE TABLE IF NOT EXISTS alerts (uuid TEXT PRIMARY KEY, pubMillis INTEGER, latitude REAL, longitude REAL, confidence INTEGER, reliability INTEGER)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_alerts_pubMillis ON alerts (pubMillis)`);
 
 // Helpers
 function Area(top, bottom, left, right) {
@@ -34,7 +37,7 @@ async function getData(top, bottom, left, right) {
     const response = await Axios.get(`https://www.waze.com/live-map/api/georss?top=${top}&bottom=${bottom}&left=${left}&right=${right}&env=row&types=alerts`);
     return response.data;
   } catch (error) {
-    console.error(`API Request Error: ${error.message} for area T:${top},B:${bottom},L:${left},R:${right}`);
+    console.error(`API Request Error: ${error.message} for area T:${top},B:${bottom},L:${left},R:${right}`); // Minimal logging
     return null;
   }
 }
@@ -56,7 +59,6 @@ function usePoliceData(data) {
   }
 }
 
-// Fetches the Waze alerts and adds them to the database
 async function fetchWazeAlerts() {
   const queue = [];
   queue.push(new Area(AREA_TOP, AREA_BOTTOM, AREA_LEFT, AREA_RIGHT));

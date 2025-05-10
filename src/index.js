@@ -1,34 +1,47 @@
 require("dotenv").config();
 
 const Waze = require("./waze");
-const SpeedCameras = require("./speed-cameras");
+// const SpeedCameras = require("./speed-cameras");
 const Grid = require("./grid");
+const Server = require("./server");
 
-const CHECK_DELAY_MS = 1000 * 60 * 10; // 10 minutes
+const WAZE_UPDATE_INTERVAL_MS = 1000 * 60 * 10;
+const GRID_UPDATE_INTERVAL_MS = 1000 * 60 * 60 * 24;
+let lastGridUpdateTime = 0;
 
 async function main() {
-  let lastMs = new Date().getTime();
+  let lastWazeFetchMs = new Date().getTime();
 
   while (true) {
+    const currentMs = new Date().getTime();
+
+    // Fetch Waze Alerts (every 10 minutes)
     await Waze.fetchWazeAlerts();
-    // Fetch Speed Camera information every month
-    // Update Grid storage every 24 hours
+    lastWazeFetchMs = currentMs;
 
-    await new Promise((resolve) => {
-      const currentMs = new Date().getTime();
-      const timeElapsed = currentMs - lastMs;
-
-      if (timeElapsed >= CHECK_DELAY_MS) {
-        lastMs = currentMs;
-        resolve();
-      } else {
-        setTimeout(() => {
-          lastMs = new Date().getTime();
-          resolve();
-        }, CHECK_DELAY_MS - timeElapsed);
+    // Update Grid storage (every 24 hours)
+    if (currentMs - lastGridUpdateTime >= GRID_UPDATE_INTERVAL_MS) {
+      console.log("Updating density grids...");
+      try {
+        await Grid.updateGrids();
+        lastGridUpdateTime = currentMs;
+        console.log("Density grids updated.");
+      } catch (err) {
+        console.error("Error updating density grids:", err);
       }
-    });
+    }
+
+    const timeElapsedForWaze = currentMs - lastWazeFetchMs;
+    const delayForWaze = WAZE_UPDATE_INTERVAL_MS - timeElapsedForWaze;
+
+    if (delayForWaze > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayForWaze));
+    }
   }
 }
 
+// Run the main loop
 main();
+
+// Start the API server
+Server.startServer();
