@@ -78,18 +78,18 @@ function processTimeWindow(db, window, now) {
   const reports = db.prepare(`SELECT longitude, latitude FROM alerts WHERE ${window.filter(now)}`).all();
 
   if (reports.length === 0) {
-    console.log(`  No alert data for window ${window.id}. Skipping.`);
+    console.log(`No alert data for window ${window.id}. Skipping.`);
     return;
   }
 
-  console.log(`  Found ${reports.length} reports for window ${window.id}.`);
+  console.log(`Found ${reports.length} reports for window ${window.id}.`);
   const validReports = reports.filter((r) => r.longitude != null && r.latitude != null && !isNaN(r.longitude) && !isNaN(r.latitude));
 
   return validReports;
 }
 
 function processPrecisionLevel(reports, level, windowId) {
-  console.log(`  Processing precision level ${level} for window ${windowId}...`);
+  console.log(`Processing precision level ${level} for window ${windowId}...`);
   const cellCounts = new Map();
 
   // Aggregate alerts into tiles
@@ -104,11 +104,11 @@ function processPrecisionLevel(reports, level, windowId) {
   }
 
   if (cellCounts.size === 0) {
-    console.log(`    No cells with data for level ${level}, window ${windowId}. Skipping.`);
+    console.log(`No cells with data for level ${level}, window ${windowId}. Skipping.`);
     return null;
   }
 
-  console.log(`    Level ${level} (window ${windowId}): Found ${cellCounts.size} unique cells with alert data.`);
+  console.log(`Level ${level} (window ${windowId}): Found ${cellCounts.size} unique cells with alert data.`);
   return cellCounts;
 }
 
@@ -159,9 +159,9 @@ async function generateHeatmapData() {
 
       try {
         bulkInsert(inserts);
-        console.log(`    Successfully inserted ${inserts.length} density records for level ${level}, window ${window.id}.`);
+        console.log(`Successfully inserted ${inserts.length} density records for level ${level}, window ${window.id}.`);
       } catch (error) {
-        console.error(`    Error inserting data for window ${window.id}, level ${level}:`, error);
+        console.error(`Error inserting data for window ${window.id}, level ${level}:`, error);
       }
     }
   }
