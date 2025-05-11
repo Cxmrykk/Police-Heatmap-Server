@@ -13,26 +13,27 @@ const TIME_WINDOWS = [
   { id: 0, name: "last 7 days", filter: (now) => `pubMillis >= ${now - 7 * DAY_MS}` },
   { id: 1, name: "7-14 days ago", filter: (now) => `pubMillis < ${now - 7 * DAY_MS} AND pubMillis >= ${now - 14 * DAY_MS}` },
   { id: 2, name: "14-30 days ago", filter: (now) => `pubMillis < ${now - 14 * DAY_MS} AND pubMillis >= ${now - 30 * DAY_MS}` },
-  { id: 3, name: "older than 30 days", filter: (now) => `pubMillis < ${now - 30 * DAY_MS}` },
+  { id: 3, name: "30-90 days ago", filter: (now) => `pubMillis < ${now - 30 * DAY_MS} AND pubMillis >= ${now - 90 * DAY_MS}` },
 ];
 
 // Coordinate processing functions
 function scaleCoordinate(coord, precision) {
-  if (coord === null || isNaN(coord)) return null;
-  return Math.trunc(coord * Math.pow(10, precision));
+  if (!coord || typeof coord !== "number" || isNaN(coord)) return null;
+  return Math.trunc(coord * 10 ** precision);
 }
 
 function normalize(value, min, max, scale = 255) {
   if (max === min) return min > 0 ? scale : 0;
+  if (value === null || isNaN(value)) return 0;
   return Math.round(((value - min) / (max - min)) * scale);
 }
 
-function getMinMax(values) {
+function getMinMax(countsMap) {
   let min = Infinity,
     max = -Infinity;
   let hasValues = false;
 
-  for (const val of values.values()) {
+  for (const val of countsMap.values()) {
     if (val === null || isNaN(val)) continue;
     hasValues = true;
     min = Math.min(min, val);
@@ -42,79 +43,22 @@ function getMinMax(values) {
   return hasValues ? { min, max } : { min: 0, max: 0 };
 }
 
-async function generateHeatmapData() {
-  const db = new Database(Path.join(CACHE_DIR, DB_FILE));
-  initializeDatabase(db);
-
-  const insert = db.prepare(`
-    INSERT INTO density_grids (time_window_id, level, lon_scaled, lat_scaled, density)
-    VALUES (?, ?, ?, ?, ?)
-  `);
-
-  const bulkInsert = db.transaction((items) => {
-    for (const item of items) {
-      insert.run(item.time_window_id, item.level, item.lon_scaled, item.lat_scaled, item.density);
-    }
-  });
-
-  const now = Date.now();
-
-  for (const window of TIME_WINDOWS) {
-    console.log(`Processing: ${window.name} (ID: ${window.id})`);
-
-    const reports = db.prepare(`SELECT longitude, latitude FROM alerts WHERE ${window.filter(now)}`).all();
-
-    if (reports.length === 0) {
-      console.log(`No data for window ${window.id}. Skipping.`);
-      continue;
-    }
-
-    console.log(`Found ${reports.length} reports for window ${window.id}.`);
-
-    // Process highest precision level first
-    console.log(`Processing precision level ${PRECISION.MAX}...`);
-    const highestPrecisionCounts = processMaxPrecisionLevel(reports, window.id, bulkInsert);
-
-    if (!highestPrecisionCounts || highestPrecisionCounts.size === 0) {
-      console.log(`No data generated for level ${PRECISION.MAX}.`);
-      continue;
-    }
-
-    console.log(`Level ${PRECISION.MAX} complete: ${highestPrecisionCounts.size} cells.`);
-
-    // Process lower precision levels
-    let previousLevelData = highestPrecisionCounts;
-
-    for (let level = PRECISION.MAX - 1; level >= PRECISION.MIN; level--) {
-      console.log(`Processing precision level ${level}...`);
-
-      previousLevelData = aggregateToLowerPrecision(previousLevelData, level, window.id, bulkInsert);
-
-      if (!previousLevelData || previousLevelData.size === 0) {
-        console.log(`No data for level ${level}. Stopping for this window.`);
-        break;
-      }
-
-      console.log(`Level ${level} complete: ${previousLevelData.size} cells.`);
-    }
-  }
-
-  db.close();
-}
-
 function initializeDatabase(db) {
-  db.exec(`CREATE TABLE IF NOT EXISTS alerts (
-    uuid TEXT PRIMARY KEY, 
-    pubMillis INTEGER, 
-    latitude REAL, 
-    longitude REAL, 
-    confidence INTEGER, 
-    reliability INTEGER
-  )`);
-
+  // Create alerts table if it doesn't exist
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS alerts (
+      uuid TEXT PRIMARY KEY, 
+      pubMillis INTEGER, 
+      latitude REAL, 
+      longitude REAL, 
+      confidence INTEGER, 
+      reliability INTEGER
+    )
+  `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_alerts_pubMillis ON alerts (pubMillis)`);
-  db.exec(`DROP TABLE IF EXISTS density_grids;`);
 
+  // Recreate density_grids table
+  db.exec(`DROP TABLE IF EXISTS density_grids`);
   db.exec(`
     CREATE TABLE density_grids (
       time_window_id INTEGER NOT NULL, 
@@ -123,104 +67,107 @@ function initializeDatabase(db) {
       lat_scaled INTEGER NOT NULL, 
       density INTEGER NOT NULL,
       PRIMARY KEY (time_window_id, level, lon_scaled, lat_scaled)
-    );
+    )
   `);
-
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_density_grids_coords ON density_grids (time_window_id, level, lon_scaled, lat_scaled);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_density_grids_coords ON density_grids (time_window_id, level, lon_scaled, lat_scaled)`);
 }
 
-function processMaxPrecisionLevel(reports, windowId, bulkInsert) {
+function processTimeWindow(db, window, now) {
+  console.log(`Processing time window: ${window.name} (ID: ${window.id})`);
+
+  const reports = db.prepare(`SELECT longitude, latitude FROM alerts WHERE ${window.filter(now)}`).all();
+
+  if (reports.length === 0) {
+    console.log(`  No alert data for window ${window.id}. Skipping.`);
+    return;
+  }
+
+  console.log(`  Found ${reports.length} reports for window ${window.id}.`);
+  const validReports = reports.filter((r) => r.longitude != null && r.latitude != null && !isNaN(r.longitude) && !isNaN(r.latitude));
+
+  return validReports;
+}
+
+function processPrecisionLevel(reports, level, windowId) {
+  console.log(`  Processing precision level ${level} for window ${windowId}...`);
   const cellCounts = new Map();
 
-  // Count reports per cell
+  // Aggregate alerts into tiles
   for (const report of reports) {
-    if (!report.longitude || !report.latitude || isNaN(report.longitude) || isNaN(report.latitude)) continue;
+    const lonScaled = scaleCoordinate(report.longitude, level);
+    const latScaled = scaleCoordinate(report.latitude, level);
 
-    const lon = scaleCoordinate(report.longitude, PRECISION.MAX);
-    const lat = scaleCoordinate(report.latitude, PRECISION.MAX);
+    if (lonScaled === null || latScaled === null) continue;
 
-    if (lon === null || lat === null) continue;
-
-    const key = `${lon}_${lat}`;
+    const key = `${lonScaled}_${latScaled}`;
     cellCounts.set(key, (cellCounts.get(key) || 0) + 1);
   }
 
-  if (cellCounts.size === 0) return null;
-
-  // Normalize counts for storage
-  const { max } = getMinMax(cellCounts);
-  const inserts = [];
-
-  cellCounts.forEach((count, key) => {
-    const [lon, lat] = key.split("_").map(Number);
-    const density = normalize(count, 0, max);
-
-    inserts.push({
-      time_window_id: windowId,
-      level: PRECISION.MAX,
-      lon_scaled: lon,
-      lat_scaled: lat,
-      density,
-    });
-  });
-
-  try {
-    if (inserts.length > 0) bulkInsert(inserts);
-  } catch (error) {
-    console.error(`Error inserting data for window ${windowId}:`, error);
-    throw error;
+  if (cellCounts.size === 0) {
+    console.log(`    No cells with data for level ${level}, window ${windowId}. Skipping.`);
+    return null;
   }
 
+  console.log(`    Level ${level} (window ${windowId}): Found ${cellCounts.size} unique cells with alert data.`);
   return cellCounts;
 }
 
-function aggregateToLowerPrecision(higherLevelData, currentLevel, windowId, bulkInsert) {
-  // Aggregate counts from higher precision to current level
-  const aggregatedCounts = new Map();
-
-  higherLevelData.forEach((count, key) => {
-    const [lon, lat] = key.split("_").map(Number);
-
-    const parentLon = Math.trunc(lon / 10);
-    const parentLat = Math.trunc(lat / 10);
-    const parentKey = `${parentLon}_${parentLat}`;
-
-    aggregatedCounts.set(parentKey, (aggregatedCounts.get(parentKey) || 0) + count);
-  });
-
-  if (aggregatedCounts.size === 0) return null;
-
-  // Get non-zero counts for normalization
-  const nonZeroCounts = new Map();
-  for (const [key, count] of aggregatedCounts) {
-    if (count > 0) nonZeroCounts.set(key, count);
-  }
-
-  // Normalize and prepare for storage
-  const { min, max } = getMinMax(nonZeroCounts);
+function prepareInserts(cellCounts, level, windowId) {
+  const { min, max } = getMinMax(cellCounts);
   const inserts = [];
 
-  aggregatedCounts.forEach((count, key) => {
-    const [lon, lat] = key.split("_").map(Number);
-    const density = count > 0 ? normalize(count, min, max) : 0;
-
+  cellCounts.forEach((count, key) => {
+    const [lonStr, latStr] = key.split("_");
     inserts.push({
       time_window_id: windowId,
-      level: currentLevel,
-      lon_scaled: lon,
-      lat_scaled: lat,
-      density,
+      level,
+      lon_scaled: Number(lonStr),
+      lat_scaled: Number(latStr),
+      density: normalize(count, min, max),
     });
   });
 
-  try {
-    if (inserts.length > 0) bulkInsert(inserts);
-  } catch (error) {
-    console.error(`Error inserting data for window ${windowId}, level ${currentLevel}:`, error);
-    throw error;
+  return inserts;
+}
+
+async function generateHeatmapData() {
+  const db = new Database(Path.join(CACHE_DIR, DB_FILE));
+  initializeDatabase(db);
+
+  const insertStmt = db.prepare(`
+    INSERT INTO density_grids (time_window_id, level, lon_scaled, lat_scaled, density)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+
+  const bulkInsert = db.transaction((items) => {
+    for (const item of items) {
+      insertStmt.run(item.time_window_id, item.level, item.lon_scaled, item.lat_scaled, item.density);
+    }
+  });
+
+  const now = Date.now();
+
+  for (const window of TIME_WINDOWS) {
+    const validReports = processTimeWindow(db, window, now);
+    if (!validReports) continue;
+
+    for (let level = PRECISION.MAX; level >= PRECISION.MIN; level--) {
+      const cellCounts = processPrecisionLevel(validReports, level, window.id);
+      if (!cellCounts) continue;
+
+      const inserts = prepareInserts(cellCounts, level, window.id);
+
+      try {
+        bulkInsert(inserts);
+        console.log(`    Successfully inserted ${inserts.length} density records for level ${level}, window ${window.id}.`);
+      } catch (error) {
+        console.error(`    Error inserting data for window ${window.id}, level ${level}:`, error);
+      }
+    }
   }
 
-  return aggregatedCounts;
+  db.close();
+  console.log("Heatmap data generation complete.");
 }
 
 module.exports = { updateGrids: generateHeatmapData };
