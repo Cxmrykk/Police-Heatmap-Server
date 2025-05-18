@@ -42,13 +42,10 @@ envSettings.forEach((setting) => {
       parsedValue = value; // Already a string
       break;
     default:
-      // This case should ideally not be reached if envSettings is correct
       errors.push(`Internal error: Unknown type definition for ${setting.key}: ${setting.type}`);
-      return; // Don't assign if type is unknown
+      return;
   }
 
-  // Check if parsing was successful (e.g., not NaN for numbers)
-  // For strings, parsedValue will be the original string value.
   if (parsedValue !== undefined && !errors.some((err) => err.startsWith(`Invalid value for ${setting.key}`))) {
     if (setting.validate && !setting.validate(parsedValue)) {
       errors.push(`Invalid value for ${setting.key}: ${setting.errorMsg || `failed validation`}. Got "${value}"`);
@@ -64,7 +61,6 @@ if (errors.length > 0) {
   process.exit(1);
 }
 
-// Add other shared, static configurations here if desired
 config.DB_FILENAME = "alerts.sqlite";
 
 module.exports = config;

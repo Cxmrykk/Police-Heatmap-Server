@@ -1,5 +1,4 @@
 const Database = require("better-sqlite3");
-const Path = require("path");
 const config = require("./config");
 
 // Constants
@@ -7,13 +6,17 @@ const PRECISION = { MAX: 5, MIN: 0 };
 const DAY_MS = 86400000; // 24h in milliseconds
 const CACHE_DIR = config.HEATMAP_CACHE_DIR_PATH;
 const DB_FILE = config.DB_FILENAME;
+// const TEMPORAL_DIVERSITY_RADIUS = config.TEMPORAL_DIVERSITY_RADIUS; // No longer from config
+
+// New: Hardcoded diversity radii
+const DIVERSITY_RADII = [0.00001, 0.000025, 0.00005, 0.0001];
 
 // Time window definitions
 const TIME_WINDOWS = [
-  { id: 0, name: "last 7 days", filter: (now) => `pubMillis >= ${now - 7 * DAY_MS}` },
-  { id: 1, name: "7-14 days ago", filter: (now) => `pubMillis < ${now - 7 * DAY_MS} AND pubMillis >= ${now - 14 * DAY_MS}` },
-  { id: 2, name: "14-30 days ago", filter: (now) => `pubMillis < ${now - 14 * DAY_MS} AND pubMillis >= ${now - 30 * DAY_MS}` },
-  { id: 3, name: "30-90 days ago", filter: (now) => `pubMillis < ${now - 30 * DAY_MS} AND pubMillis >= ${now - 90 * DAY_MS}` },
+  { id: 0, name: "last 7 days", daysAgoStart: 0, daysAgoEnd: 7 },
+  { id: 1, name: "7-14 days ago", daysAgoStart: 7, daysAgoEnd: 14 },
+  { id: 2, name: "14-30 days ago", daysAgoStart: 14, daysAgoEnd: 30 },
+  { id: 3, name: "30-90 days ago", daysAgoStart: 30, daysAgoEnd: 90 },
 ];
 
 // Helper functions
@@ -29,216 +32,304 @@ function normalize(value, min, max, scale = 255) {
 }
 
 function getMinMax(countsMap) {
-  let min = Infinity, max = -Infinity;
-  let hasValues = false;
-
+  let min = Infinity,
+    max = -Infinity,
+    hasValues = false;
   for (const val of countsMap.values()) {
     if (val === null || isNaN(val)) continue;
     hasValues = true;
     min = Math.min(min, val);
     max = Math.max(max, val);
   }
-
   return hasValues ? { min, max } : { min: 0, max: 0 };
 }
 
 function initializeDatabase(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS alerts (
-      uuid TEXT PRIMARY KEY, 
-      pubMillis INTEGER, 
-      latitude REAL, 
-      longitude REAL, 
-      confidence INTEGER, 
-      reliability INTEGER
-    )
-  `);
+  db.exec(`CREATE TABLE IF NOT EXISTS alerts (uuid TEXT PRIMARY KEY, pubMillis INTEGER, latitude REAL, longitude REAL, confidence INTEGER, reliability INTEGER)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_alerts_pubMillis ON alerts (pubMillis)`);
+
   db.exec(`DROP TABLE IF EXISTS density_grids`);
+  db.exec(`CREATE TABLE density_grids (time_window_id INTEGER NOT NULL, level INTEGER NOT NULL, lon_scaled INTEGER NOT NULL, lat_scaled INTEGER NOT NULL, density INTEGER NOT NULL, PRIMARY KEY (time_window_id, level, lon_scaled, lat_scaled))`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_density_grids_coords ON density_grids (time_window_id, level, lon_scaled, lat_scaled)`);
+
+  db.exec(`DROP TABLE IF EXISTS temporal_diversity_grids`);
   db.exec(`
-    CREATE TABLE density_grids (
-      time_window_id INTEGER NOT NULL, 
-      level INTEGER NOT NULL, 
-      lon_scaled INTEGER NOT NULL, 
-      lat_scaled INTEGER NOT NULL, 
-      density INTEGER NOT NULL,
-      density_scaled INTEGER NOT NULL,
-      PRIMARY KEY (time_window_id, level, lon_scaled, lat_scaled)
+    CREATE TABLE temporal_diversity_grids (
+      radius_group_id INTEGER NOT NULL, -- New column
+      level INTEGER NOT NULL,
+      lon_scaled INTEGER NOT NULL,
+      lat_scaled INTEGER NOT NULL,
+      diversity_score INTEGER NOT NULL,
+      PRIMARY KEY (radius_group_id, level, lon_scaled, lat_scaled) -- Updated PK
     )
   `);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_density_grids_coords ON density_grids (time_window_id, level, lon_scaled, lat_scaled)`);
+  // Index updated to include radius_group_id first for queries filtering by it
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_temporal_diversity_grids_coords ON temporal_diversity_grids (radius_group_id, level, lon_scaled, lat_scaled)`);
 }
 
-function processTimeWindow(db, window, now) {
-  console.log(`Processing time window: ${window.name} (ID: ${window.id})`);
-  const reports = db.prepare(`SELECT longitude, latitude FROM alerts WHERE ${window.filter(now)}`).all();
-
+// --- Density Grid Generation Logic ---
+function processTimeWindowForDensity(db, windowDef, now) {
+  const startMillis = now - windowDef.daysAgoEnd * DAY_MS;
+  const endMillisStrict = now - windowDef.daysAgoStart * DAY_MS;
+  // console.log(`Density: Processing time window: ${windowDef.name} (ID: ${windowDef.id})`);
+  const reports = db
+    .prepare(
+      `SELECT longitude, latitude FROM alerts 
+         WHERE pubMillis >= ? AND pubMillis < ? 
+         AND longitude IS NOT NULL AND latitude IS NOT NULL`
+    )
+    .all(startMillis, endMillisStrict);
   if (reports.length === 0) {
-    console.log(`No alert data for window ${window.id}. Skipping density generation for this window.`);
+    // console.log(`Density: No alert data for window ${windowDef.id}. Skipping.`);
     return null;
   }
-
-  console.log(`Found ${reports.length} reports for window ${window.id}.`);
-  const validReports = reports.filter(r => 
-    r.longitude != null && r.latitude != null && !isNaN(r.longitude) && !isNaN(r.latitude)
-  );
-
-  if (validReports.length === 0) {
-    console.log(`No valid (lon/lat) alert data for window ${window.id} after filtering. Skipping density generation.`);
-    return null;
-  }
-  
-  return validReports;
+  // console.log(`Density: Found ${reports.length} valid reports for window ${windowDef.id}.`);
+  return reports;
 }
-
-function getReportCountForWindow(db, window, now) {
-  const result = db.prepare(`SELECT COUNT(*) as count FROM alerts WHERE ${window.filter(now)}`).get();
-  return result ? result.count : 0;
-}
-
-function processPrecisionLevel(reports, level, windowId) {
-  console.log(`Processing precision level ${level} for window ${windowId}...`);
+function processPrecisionLevelForDensity(reports, level, windowId) {
   const cellCounts = new Map();
-  
   for (const report of reports) {
     const lonScaled = scaleCoordinate(report.longitude, level);
     const latScaled = scaleCoordinate(report.latitude, level);
-    
     if (lonScaled === null || latScaled === null) continue;
-    
     const key = `${lonScaled}_${latScaled}`;
     cellCounts.set(key, (cellCounts.get(key) || 0) + 1);
   }
-
-  if (cellCounts.size === 0) {
-    console.log(`No cells with data for level ${level}, window ${windowId}. Skipping.`);
-    return null;
-  }
-  
-  console.log(`Level ${level} (window ${windowId}): Found ${cellCounts.size} unique cells with alert data.`);
+  if (cellCounts.size === 0) return null;
   return cellCounts;
 }
-
-function prepareInserts(cellCounts, level, windowId, multiplier) {
+function prepareDensityInserts(cellCounts, level, windowId) {
   const logScaledCounts = new Map();
-  
   cellCounts.forEach((count, key) => {
     logScaledCounts.set(key, Math.log1p(count));
   });
-
   const { min, max } = getMinMax(logScaledCounts);
   const inserts = [];
-
-  cellCounts.forEach((originalCount, key) => {
+  cellCounts.forEach((_, key) => {
     const [lonStr, latStr] = key.split("_");
     const logScaledValue = logScaledCounts.get(key);
     const density = normalize(logScaledValue, min, max);
-    
-    let densityScaled = Math.round(density * multiplier);
-    densityScaled = Math.max(0, Math.min(255, densityScaled));
-
     if (density > 0) {
-      inserts.push({
-        time_window_id: windowId,
-        level,
-        lon_scaled: Number(lonStr),
-        lat_scaled: Number(latStr),
-        density,
-        density_scaled: densityScaled
-      });
+      inserts.push({ time_window_id: windowId, level, lon_scaled: Number(lonStr), lat_scaled: Number(latStr), density });
     }
   });
-  
   return inserts;
 }
-
-async function generateHeatmapData() {
-  const db = new Database(Path.join(CACHE_DIR, DB_FILE));
-  initializeDatabase(db);
-
-  const insertStmt = db.prepare(`
-    INSERT INTO density_grids (time_window_id, level, lon_scaled, lat_scaled, density, density_scaled)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `);
-  
+async function generateDensityGridData(db, now) {
+  console.log("Starting density grid generation...");
+  const insertStmt = db.prepare(`INSERT INTO density_grids (time_window_id, level, lon_scaled, lat_scaled, density) VALUES (?, ?, ?, ?, ?)`);
   const bulkInsert = db.transaction((items) => {
     for (const item of items) {
-      insertStmt.run(
-        item.time_window_id, 
-        item.level, 
-        item.lon_scaled, 
-        item.lat_scaled, 
-        item.density, 
-        item.density_scaled
-      );
+      insertStmt.run(item.time_window_id, item.level, item.lon_scaled, item.lat_scaled, item.density);
+    }
+  });
+  for (const windowDef of TIME_WINDOWS) {
+    const validReports = processTimeWindowForDensity(db, windowDef, now);
+    if (!validReports) continue;
+    console.log(`Density: Processing window ${windowDef.id}, level ${PRECISION.MAX} down to ${PRECISION.MIN}. Reports: ${validReports.length}`);
+    for (let level = PRECISION.MAX; level >= PRECISION.MIN; level--) {
+      const cellCounts = processPrecisionLevelForDensity(validReports, level, windowDef.id);
+      if (!cellCounts) continue;
+      const inserts = prepareDensityInserts(cellCounts, level, windowDef.id);
+      if (inserts.length > 0) {
+        try {
+          bulkInsert(inserts); /* console.log(`Density: Inserted ${inserts.length} for L${level}, W${windowDef.id}.`); */
+        } catch (error) {
+          console.error(`Density: Error L${level}, W${windowDef.id}:`, error);
+        }
+      }
+    }
+  }
+  console.log("Density grid generation complete.");
+}
+
+// --- Temporal Diversity Grid Generation Logic ---
+function getTimeWindowIdSqlCase(now) {
+  let caseStatement = "CASE\n";
+  for (const tw of TIME_WINDOWS) {
+    const boundaryMillis = now - tw.daysAgoEnd * DAY_MS;
+    caseStatement += `  WHEN pubMillis >= ${boundaryMillis} THEN ${tw.id}\n`;
+  }
+  caseStatement += "  ELSE NULL\nEND";
+  return caseStatement;
+}
+
+async function generateTemporalDiversityGridData(db, now) {
+  console.log("Starting temporal diversity grid generation for multiple radii...");
+
+  const timeWindowIdCaseSql = getTimeWindowIdSqlCase(now);
+  const oldestTimeWindow = TIME_WINDOWS[TIME_WINDOWS.length - 1];
+  const oldestRelevantPubMillis = now - oldestTimeWindow.daysAgoEnd * DAY_MS;
+
+  console.log("Temporal Diversity: Fetching alerts with time window IDs from DB...");
+  const alertsWithSqlTimeWindow = db
+    .prepare(
+      `
+    SELECT uuid, pubMillis, latitude, longitude, (${timeWindowIdCaseSql}) AS timeWindowId 
+    FROM alerts 
+    WHERE latitude IS NOT NULL AND longitude IS NOT NULL AND pubMillis >= ?
+  `
+    )
+    .all(oldestRelevantPubMillis);
+
+  const validAlertsForDiversity = alertsWithSqlTimeWindow.filter((a) => a.timeWindowId !== null);
+  console.log(`Temporal Diversity: ${validAlertsForDiversity.length} alerts successfully assigned to a time window.`);
+
+  if (validAlertsForDiversity.length === 0) {
+    console.log("Temporal Diversity: No alerts with time window data to process. Skipping.");
+    return;
+  }
+
+  console.log("Temporal Diversity: Building map of most recent time window IDs per cell...");
+  const cellMostRecentTimeWindowIdMap = new Map();
+  for (const alert of validAlertsForDiversity) {
+    const lonScaled = scaleCoordinate(alert.longitude, PRECISION.MAX);
+    const latScaled = scaleCoordinate(alert.latitude, PRECISION.MAX);
+    if (lonScaled === null || latScaled === null) continue;
+    const cellKey = `${lonScaled}_${latScaled}`;
+    const currentTWIDInMap = cellMostRecentTimeWindowIdMap.get(cellKey);
+    if (currentTWIDInMap === undefined || alert.timeWindowId < currentTWIDInMap) {
+      cellMostRecentTimeWindowIdMap.set(cellKey, alert.timeWindowId);
+    }
+  }
+  console.log(`Temporal Diversity: Built map with ${cellMostRecentTimeWindowIdMap.size} cells at PRECISION.MAX.`);
+
+  const insertStmt = db.prepare(`
+    INSERT INTO temporal_diversity_grids (radius_group_id, level, lon_scaled, lat_scaled, diversity_score)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  const bulkInsertDiversity = db.transaction((items) => {
+    for (const item of items) {
+      insertStmt.run(item.radius_group_id, item.level, item.lon_scaled, item.lat_scaled, item.diversity_score);
     }
   });
 
-  const now = Date.now();
+  const cellResolution = Math.pow(10, -PRECISION.MAX);
 
-  // Calculate report counts and multipliers
-  console.log("Calculating report counts per time window for global scaling...");
-  const windowReportCounts = new Map();
-  let totalAlerts = 0;
-  
-  for (const window of TIME_WINDOWS) {
-    const count = getReportCountForWindow(db, window, now);
-    windowReportCounts.set(window.id, count);
-    totalAlerts += count;
-    console.log(`Reports for window ${window.id} (${window.name}): ${count}`);
-  }
-  console.log(`Total alerts across all windows: ${totalAlerts}`);
+  for (let radiusGroupId = 0; radiusGroupId < DIVERSITY_RADII.length; radiusGroupId++) {
+    const currentRadius = DIVERSITY_RADII[radiusGroupId];
+    console.log(`\nTemporal Diversity: Processing for radius group ${radiusGroupId} (radius: ${currentRadius})...`);
 
-  // Calculate multipliers
-  const windowMultipliers = new Map();
-  for (const window of TIME_WINDOWS) {
-    const count = windowReportCounts.get(window.id) || 0;
-    let multiplier = 1.0;
-    
-    if (totalAlerts > 0 && count > 0) {
-      const activeWindows = TIME_WINDOWS.filter(tw => 
-        (windowReportCounts.get(tw.id) || 0) > 0
-      ).length;
-      
-      if (count !== totalAlerts || activeWindows > 1) {
-        multiplier = 1 - count / totalAlerts;
-        multiplier = Math.max(0.001, multiplier);
-      }
-    }
-    
-    windowMultipliers.set(window.id, multiplier);
-    console.log(`Window ${window.id} multiplier: ${multiplier.toFixed(4)}`);
-  }
+    const levelMaxCellDiversity = new Map();
+    const neighborhoodHalfWidthInCells = Math.floor(currentRadius / cellResolution);
 
-  // Process each time window
-  for (const window of TIME_WINDOWS) {
-    const validReports = processTimeWindow(db, window, now);
-    if (!validReports) continue;
+    let processedCount = 0;
+    const totalToProcessForScores = validAlertsForDiversity.length;
+    if (totalToProcessForScores === 0) continue;
 
-    const multiplier = windowMultipliers.get(window.id) ?? 1.0;
+    process.stdout.write(`Temporal Diversity (Radius Group ${radiusGroupId}): Calculating scores... 0% (0/${totalToProcessForScores})\r`);
 
-    // Process each precision level
-    for (let level = PRECISION.MAX; level >= PRECISION.MIN; level--) {
-      const cellCounts = processPrecisionLevel(validReports, level, window.id);
-      if (!cellCounts) continue;
+    for (const anchorAlert of validAlertsForDiversity) {
+      const anchorLonScaled = scaleCoordinate(anchorAlert.longitude, PRECISION.MAX);
+      const anchorLatScaled = scaleCoordinate(anchorAlert.latitude, PRECISION.MAX);
 
-      const inserts = prepareInserts(cellCounts, level, window.id, multiplier);
-
-      if (inserts.length > 0) {
-        try {
-          bulkInsert(inserts);
-          console.log(`Inserted ${inserts.length} density records for level ${level}, window ${window.id}.`);
-        } catch (error) {
-          console.error(`Error inserting data for window ${window.id}, level ${level}:`, error);
+      if (anchorLonScaled === null || anchorLatScaled === null) {
+        processedCount++;
+        // Conditional progress update
+        if (processedCount % 100 === 0 || processedCount === totalToProcessForScores) {
+          const percentage = Math.floor((processedCount / totalToProcessForScores) * 100);
+          process.stdout.write(`Temporal Diversity (Radius Group ${radiusGroupId}): Calculating scores... ${percentage}% (${processedCount}/${totalToProcessForScores})\r`);
         }
-      } else {
-        console.log(`No density records to insert for level ${level}, window ${window.id}.`);
+        continue;
+      }
+
+      const uniqueTimeWindowsInProximity = new Set();
+      for (let dy = -neighborhoodHalfWidthInCells; dy <= neighborhoodHalfWidthInCells; dy++) {
+        for (let dx = -neighborhoodHalfWidthInCells; dx <= neighborhoodHalfWidthInCells; dx++) {
+          const targetLonScaled = anchorLonScaled + dx;
+          const targetLatScaled = anchorLatScaled + dy;
+          const neighborCellKey = `${targetLonScaled}_${targetLatScaled}`;
+          if (cellMostRecentTimeWindowIdMap.has(neighborCellKey)) {
+            uniqueTimeWindowsInProximity.add(cellMostRecentTimeWindowIdMap.get(neighborCellKey));
+          }
+        }
+      }
+
+      const diversityScoreForAnchor = uniqueTimeWindowsInProximity.size;
+      const anchorCellKey = `${anchorLonScaled}_${anchorLatScaled}`;
+      levelMaxCellDiversity.set(anchorCellKey, Math.max(levelMaxCellDiversity.get(anchorCellKey) || 0, diversityScoreForAnchor));
+
+      processedCount++;
+      if (processedCount % 100 === 0 || processedCount === totalToProcessForScores) {
+        const percentage = Math.floor((processedCount / totalToProcessForScores) * 100);
+        process.stdout.write(`Temporal Diversity (Radius Group ${radiusGroupId}): Calculating scores... ${percentage}% (${processedCount}/${totalToProcessForScores})\r`);
       }
     }
-  }
+    process.stdout.write("\n");
+    console.log(`Temporal Diversity (Radius Group ${radiusGroupId}): Finished. Found ${levelMaxCellDiversity.size} cells with scores at level ${PRECISION.MAX}.`);
 
-  db.close();
-  console.log("Heatmap data generation complete.");
+    const levelMaxInserts = [];
+    levelMaxCellDiversity.forEach((score, key) => {
+      const [lonStr, latStr] = key.split("_");
+      if (score > 0) {
+        levelMaxInserts.push({ radius_group_id: radiusGroupId, level: PRECISION.MAX, lon_scaled: Number(lonStr), lat_scaled: Number(latStr), diversity_score: score });
+      }
+    });
+
+    if (levelMaxInserts.length > 0) {
+      try {
+        bulkInsertDiversity(levelMaxInserts);
+        console.log(`Temporal Diversity (Radius Group ${radiusGroupId}): Inserted ${levelMaxInserts.length} records for level ${PRECISION.MAX}.`);
+      } catch (error) {
+        console.error(`Temporal Diversity (Radius Group ${radiusGroupId}): Error L${PRECISION.MAX}:`, error);
+      }
+    } else {
+      console.log(`Temporal Diversity (Radius Group ${radiusGroupId}): No records to insert for level ${PRECISION.MAX}.`);
+    }
+
+    // Aggregate to lower precision levels FOR THIS RADIUS GROUP
+    for (let level = PRECISION.MAX - 1; level >= PRECISION.MIN; level--) {
+      // console.log(`Temporal Diversity (Radius Group ${radiusGroupId}): Aggregating for level ${level}...`);
+      const lowerLevelCellDiversity = new Map();
+      const higherLevelCells = db.prepare(`SELECT lon_scaled, lat_scaled, diversity_score FROM temporal_diversity_grids WHERE radius_group_id = ? AND level = ?`).all(radiusGroupId, level + 1);
+
+      if (higherLevelCells.length === 0) {
+        /* console.log(`Skipping L${level} for RG${radiusGroupId}, no data from L${level+1}.`); */ continue;
+      }
+
+      for (const higherCell of higherLevelCells) {
+        const parentLonScaled = Math.trunc(higherCell.lon_scaled / 10);
+        const parentLatScaled = Math.trunc(higherCell.lat_scaled / 10);
+        const parentCellKey = `${parentLonScaled}_${parentLatScaled}`;
+        lowerLevelCellDiversity.set(parentCellKey, Math.max(lowerLevelCellDiversity.get(parentCellKey) || 0, higherCell.diversity_score));
+      }
+
+      const currentLevelInserts = [];
+      lowerLevelCellDiversity.forEach((score, key) => {
+        const [lonStr, latStr] = key.split("_");
+        if (score > 0) {
+          currentLevelInserts.push({ radius_group_id: radiusGroupId, level: level, lon_scaled: Number(lonStr), lat_scaled: Number(latStr), diversity_score: score });
+        }
+      });
+
+      if (currentLevelInserts.length > 0) {
+        try {
+          bulkInsertDiversity(currentLevelInserts); /* console.log(`Inserted ${currentLevelInserts.length} for L${level}, RG${radiusGroupId}.`); */
+        } catch (error) {
+          console.error(`Error L${level}, RG${radiusGroupId}:`, error);
+        }
+      }
+    }
+    console.log(`Temporal Diversity (Radius Group ${radiusGroupId}): Aggregation complete.`);
+  }
+  console.log("All temporal diversity grid generation complete.");
 }
 
-module.exports = { updateGrids: generateHeatmapData };
+// --- Main Update Function ---
+async function updateGrids() {
+  const dbPath = require("path").join(CACHE_DIR, DB_FILE);
+  console.log(`Using database at: ${dbPath}`);
+  const db = new Database(dbPath);
+  db.pragma("journal_mode = WAL");
+
+  initializeDatabase(db);
+  const now = Date.now();
+
+  await generateDensityGridData(db, now);
+  await generateTemporalDiversityGridData(db, now);
+
+  db.close();
+  console.log("All grid data generation and database updates are complete.");
+}
+
+module.exports = { updateGrids };
