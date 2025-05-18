@@ -6,7 +6,6 @@ const PRECISION = { MAX: 5, MIN: 0 };
 const DAY_MS = 86400000; // 24h in milliseconds
 const CACHE_DIR = config.HEATMAP_CACHE_DIR_PATH;
 const DB_FILE = config.DB_FILENAME;
-// const TEMPORAL_DIVERSITY_RADIUS = config.TEMPORAL_DIVERSITY_RADIUS; // No longer from config
 
 // New: Hardcoded diversity radii
 const DIVERSITY_RADII = [0.00001, 0.000025, 0.00005, 0.0001];
@@ -63,14 +62,13 @@ function initializeDatabase(db) {
       PRIMARY KEY (radius_group_id, level, lon_scaled, lat_scaled) -- Updated PK
     )
   `);
-  // Index updated to include radius_group_id first for queries filtering by it
   db.exec(`CREATE INDEX IF NOT EXISTS idx_temporal_diversity_grids_coords ON temporal_diversity_grids (radius_group_id, level, lon_scaled, lat_scaled)`);
 }
 
 // --- Density Grid Generation Logic ---
-function processTimeWindowForDensity(db, windowDef, now) {
-  const startMillis = now - windowDef.daysAgoEnd * DAY_MS;
-  const endMillisStrict = now - windowDef.daysAgoStart * DAY_MS;
+function processTimeWindowForDensity(db, windowDef, referenceTimestamp) {
+  const startMillis = referenceTimestamp - windowDef.daysAgoEnd * DAY_MS;
+  const endMillisStrict = referenceTimestamp - windowDef.daysAgoStart * DAY_MS;
   // console.log(`Density: Processing time window: ${windowDef.name} (ID: ${windowDef.id})`);
   const reports = db
     .prepare(
@@ -115,7 +113,7 @@ function prepareDensityInserts(cellCounts, level, windowId) {
   });
   return inserts;
 }
-async function generateDensityGridData(db, now) {
+async function generateDensityGridData(db, referenceTimestamp) {
   console.log("Starting density grid generation...");
   const insertStmt = db.prepare(`INSERT INTO density_grids (time_window_id, level, lon_scaled, lat_scaled, density) VALUES (?, ?, ?, ?, ?)`);
   const bulkInsert = db.transaction((items) => {
@@ -124,7 +122,7 @@ async function generateDensityGridData(db, now) {
     }
   });
   for (const windowDef of TIME_WINDOWS) {
-    const validReports = processTimeWindowForDensity(db, windowDef, now);
+    const validReports = processTimeWindowForDensity(db, windowDef, referenceTimestamp);
     if (!validReports) continue;
     console.log(`Density: Processing window ${windowDef.id}, level ${PRECISION.MAX} down to ${PRECISION.MIN}. Reports: ${validReports.length}`);
     for (let level = PRECISION.MAX; level >= PRECISION.MIN; level--) {
@@ -144,22 +142,35 @@ async function generateDensityGridData(db, now) {
 }
 
 // --- Temporal Diversity Grid Generation Logic ---
-function getTimeWindowIdSqlCase(now) {
+function getTimeWindowIdSqlCase(referenceTimestamp) {
   let caseStatement = "CASE\n";
   for (const tw of TIME_WINDOWS) {
-    const boundaryMillis = now - tw.daysAgoEnd * DAY_MS;
-    caseStatement += `  WHEN pubMillis >= ${boundaryMillis} THEN ${tw.id}\n`;
+    // Calculate boundary relative to the referenceTimestamp
+    const boundaryStartMillis = referenceTimestamp - tw.daysAgoEnd * DAY_MS;
+    // For the "last X days" window (id:0), the end boundary is the referenceTimestamp itself.
+    // For other windows "X-Y days ago", the end boundary is referenceTimestamp - X days.
+    // The condition should be pubMillis >= boundaryStartMillis AND pubMillis < boundaryEndMillis
+    // However, the original logic implies that if pubMillis >= boundary for "daysAgoEnd", it falls into that window.
+    // Let's stick to the original logic structure for assigning to a window based on its "end" (most recent part of the window).
+    // The SQL CASE statement evaluates conditions sequentially.
+    // The order in TIME_WINDOWS (most recent first) is important here.
+    // If an alert is within "last 7 days", its pubMillis will be >= referenceTimestamp - 7*DAY_MS.
+    // If an alert is within "7-14 days ago", its pubMillis will be >= referenceTimestamp - 14*DAY_MS (and < referenceTimestamp - 7*DAY_MS).
+    // The CASE statement handles the exclusivity.
+    const boundaryMillisForWindowStart = referenceTimestamp - tw.daysAgoEnd * DAY_MS;
+    caseStatement += `  WHEN pubMillis >= ${boundaryMillisForWindowStart} THEN ${tw.id}\n`;
   }
   caseStatement += "  ELSE NULL\nEND";
   return caseStatement;
 }
 
-async function generateTemporalDiversityGridData(db, now) {
+async function generateTemporalDiversityGridData(db, referenceTimestamp) {
   console.log("Starting temporal diversity grid generation for multiple radii...");
 
-  const timeWindowIdCaseSql = getTimeWindowIdSqlCase(now);
+  const timeWindowIdCaseSql = getTimeWindowIdSqlCase(referenceTimestamp);
   const oldestTimeWindow = TIME_WINDOWS[TIME_WINDOWS.length - 1];
-  const oldestRelevantPubMillis = now - oldestTimeWindow.daysAgoEnd * DAY_MS;
+  // This defines the absolute oldest alert we care about, relative to the referenceTimestamp
+  const oldestRelevantPubMillis = referenceTimestamp - oldestTimeWindow.daysAgoEnd * DAY_MS;
 
   console.log("Temporal Diversity: Fetching alerts with time window IDs from DB...");
   const alertsWithSqlTimeWindow = db
@@ -167,9 +178,9 @@ async function generateTemporalDiversityGridData(db, now) {
       `
     SELECT uuid, pubMillis, latitude, longitude, (${timeWindowIdCaseSql}) AS timeWindowId 
     FROM alerts 
-    WHERE latitude IS NOT NULL AND longitude IS NOT NULL AND pubMillis >= ?
+    WHERE latitude IS NOT NULL AND longitude IS NOT NULL AND pubMillis >= ? 
   `
-    )
+    ) // Only fetch alerts that could possibly fall into any defined time window
     .all(oldestRelevantPubMillis);
 
   const validAlertsForDiversity = alertsWithSqlTimeWindow.filter((a) => a.timeWindowId !== null);
@@ -188,6 +199,7 @@ async function generateTemporalDiversityGridData(db, now) {
     if (lonScaled === null || latScaled === null) continue;
     const cellKey = `${lonScaled}_${latScaled}`;
     const currentTWIDInMap = cellMostRecentTimeWindowIdMap.get(cellKey);
+    // A smaller timeWindowId means a more recent window (e.g., "last 7 days" is id 0)
     if (currentTWIDInMap === undefined || alert.timeWindowId < currentTWIDInMap) {
       cellMostRecentTimeWindowIdMap.set(cellKey, alert.timeWindowId);
     }
@@ -225,7 +237,6 @@ async function generateTemporalDiversityGridData(db, now) {
 
       if (anchorLonScaled === null || anchorLatScaled === null) {
         processedCount++;
-        // Conditional progress update
         if (processedCount % 100 === 0 || processedCount === totalToProcessForScores) {
           const percentage = Math.floor((processedCount / totalToProcessForScores) * 100);
           process.stdout.write(`Temporal Diversity (Radius Group ${radiusGroupId}): Calculating scores... ${percentage}% (${processedCount}/${totalToProcessForScores})\r`);
@@ -277,14 +288,12 @@ async function generateTemporalDiversityGridData(db, now) {
       console.log(`Temporal Diversity (Radius Group ${radiusGroupId}): No records to insert for level ${PRECISION.MAX}.`);
     }
 
-    // Aggregate to lower precision levels FOR THIS RADIUS GROUP
     for (let level = PRECISION.MAX - 1; level >= PRECISION.MIN; level--) {
-      // console.log(`Temporal Diversity (Radius Group ${radiusGroupId}): Aggregating for level ${level}...`);
       const lowerLevelCellDiversity = new Map();
       const higherLevelCells = db.prepare(`SELECT lon_scaled, lat_scaled, diversity_score FROM temporal_diversity_grids WHERE radius_group_id = ? AND level = ?`).all(radiusGroupId, level + 1);
 
       if (higherLevelCells.length === 0) {
-        /* console.log(`Skipping L${level} for RG${radiusGroupId}, no data from L${level+1}.`); */ continue;
+        continue;
       }
 
       for (const higherCell of higherLevelCells) {
@@ -304,7 +313,7 @@ async function generateTemporalDiversityGridData(db, now) {
 
       if (currentLevelInserts.length > 0) {
         try {
-          bulkInsertDiversity(currentLevelInserts); /* console.log(`Inserted ${currentLevelInserts.length} for L${level}, RG${radiusGroupId}.`); */
+          bulkInsertDiversity(currentLevelInserts);
         } catch (error) {
           console.error(`Error L${level}, RG${radiusGroupId}:`, error);
         }
@@ -323,10 +332,32 @@ async function updateGrids() {
   db.pragma("journal_mode = WAL");
 
   initializeDatabase(db);
-  const now = Date.now();
 
-  await generateDensityGridData(db, now);
-  await generateTemporalDiversityGridData(db, now);
+  let referenceTimestamp;
+  try {
+    // Ensure alerts table exists before querying, though initializeDatabase should handle it.
+    // This is more of a safeguard if initializeDatabase were to change.
+    const tableCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='alerts'").get();
+    if (!tableCheck) {
+      console.warn("Alerts table does not exist. Grid generation will use current time as reference.");
+      referenceTimestamp = Date.now();
+    } else {
+      const maxPubMillisRow = db.prepare("SELECT MAX(pubMillis) as max_millis FROM alerts").get();
+      if (maxPubMillisRow && maxPubMillisRow.max_millis != null) {
+        referenceTimestamp = maxPubMillisRow.max_millis;
+        console.log(`Using latest alert pubMillis as reference timestamp: ${new Date(referenceTimestamp).toISOString()} (${referenceTimestamp})`);
+      } else {
+        referenceTimestamp = Date.now();
+        console.warn("No alerts found or max pubMillis is NULL. Falling back to current time as reference for grid generation: " + new Date(referenceTimestamp).toISOString());
+      }
+    }
+  } catch (error) {
+    console.error("Error determining reference timestamp from database. Falling back to current time.", error);
+    referenceTimestamp = Date.now();
+  }
+
+  await generateDensityGridData(db, referenceTimestamp);
+  await generateTemporalDiversityGridData(db, referenceTimestamp);
 
   db.close();
   console.log("All grid data generation and database updates are complete.");
