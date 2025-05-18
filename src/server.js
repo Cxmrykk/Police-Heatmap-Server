@@ -27,7 +27,11 @@ function startServer() {
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
   } catch (error) {
-    console.error(`FATAL: Could not open database at ${dbPath}. Error: ${error.message}`);
+    // Attempt to create the directory if it doesn't exist, then check for DB
+    // This is more relevant if the DB is created by this process on first run
+    // but grid.js is expected to create it.
+    // For now, we assume if HEATMAP_CACHE_DIR_PATH is valid, db should exist after grid run.
+    console.error(`FATAL: Could not open database at ${dbPath}. Ensure the path is correct and the database file exists (it should be created by the grid generation process). Error: ${error.message}`);
     process.exit(1);
   }
 
@@ -42,7 +46,7 @@ function startServer() {
     const queryMinLat = parseFloat(min_lat);
     const queryMaxLon = parseFloat(max_lon);
     const queryMaxLat = parseFloat(max_lat);
-    const numberOfTimeWindows = config.TIME_WINDOWS ? config.TIME_WINDOWS.length : 4;
+    const numberOfTimeWindows = config.TIME_WINDOWS ? config.TIME_WINDOWS.length : 4; // TIME_WINDOWS is not in config.js, it's in grid.js. Defaulting to 4.
 
     if (isNaN(queryTimeWindowId) || queryTimeWindowId < 0 || queryTimeWindowId >= numberOfTimeWindows || isNaN(queryLevel) || queryLevel < 0 || queryLevel > MAX_PRECISION_LEVEL || isNaN(queryMinLon) || isNaN(queryMinLat) || isNaN(queryMaxLon) || isNaN(queryMaxLat)) {
       return res.status(400).json({ error: "Invalid query parameters for density" });
@@ -83,7 +87,6 @@ function startServer() {
     const queryMaxLon = parseFloat(max_lon);
     const queryMaxLat = parseFloat(max_lat);
 
-    // Validate radius_group_id
     if (isNaN(queryRadiusGroupId) || queryRadiusGroupId < 0 || queryRadiusGroupId >= NUM_DIVERSITY_RADIUS_GROUPS) {
       return res.status(400).json({ error: `Invalid radius_group_id. Must be between 0 and ${NUM_DIVERSITY_RADIUS_GROUPS - 1}.` });
     }
@@ -100,7 +103,7 @@ function startServer() {
       const stmt = db.prepare(`
         SELECT lon_scaled, lat_scaled, diversity_score
         FROM temporal_diversity_grids
-        WHERE radius_group_id = @radius_group_id -- Filter by radius_group_id
+        WHERE radius_group_id = @radius_group_id
           AND level = @level
           AND lon_scaled >= @lonScaledMin AND lon_scaled <= @lonScaledMax
           AND lat_scaled >= @latScaledMin AND lat_scaled <= @latScaledMax
@@ -126,16 +129,40 @@ function startServer() {
     }
   };
 
+  const handleMetadataRequest = (req, res) => {
+    try {
+      const stmt = db.prepare(`SELECT key, value FROM metadata`);
+      const rows = stmt.all();
+      const metadata = rows.reduce((obj, item) => {
+        obj[item.key] = item.value;
+        return obj;
+      }, {});
+      res.json(metadata);
+    } catch (error) {
+      console.error(`Error retrieving metadata:`, error);
+      // Check if the table exists, as this is a common issue on first run if grid.js hasn't completed.
+      if (error.message.includes("no such table: metadata")) {
+        console.warn("Metadata table not found. It might be the first run or grid update is pending.");
+        return res.status(404).json({ error: "Metadata not available yet. Please try again later." });
+      }
+      res.status(500).json({ error: `Failed to retrieve metadata` });
+    }
+  };
+
   app.get("/api/density", handleDensityRequest);
   app.get("/api/diversity", handleTemporalDiversityRequest);
+  app.get("/api/metadata", handleMetadataRequest); // New metadata endpoint
 
   app.listen(API_PORT, () => {
     console.log(`API Server listening on port ${API_PORT}`);
   });
 }
 
-if (!config.TIME_WINDOWS) {
-  config.TIME_WINDOWS = [{}, {}, {}, {}];
-}
+// This was a temporary fix for config.TIME_WINDOWS, which is not defined in config.js
+// It's better to rely on the actual number of time windows from grid.js or make it configurable.
+// For now, the density endpoint uses a default of 4 if config.TIME_WINDOWS is not found.
+// if (!config.TIME_WINDOWS) {
+//   config.TIME_WINDOWS = [{}, {}, {}, {}];
+// }
 
 module.exports = { startServer };

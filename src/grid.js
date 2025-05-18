@@ -63,6 +63,9 @@ function initializeDatabase(db) {
     )
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_temporal_diversity_grids_coords ON temporal_diversity_grids (radius_group_id, level, lon_scaled, lat_scaled)`);
+
+  // Metadata table
+  db.exec(`CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)`);
 }
 
 // --- Density Grid Generation Logic ---
@@ -145,18 +148,6 @@ async function generateDensityGridData(db, referenceTimestamp) {
 function getTimeWindowIdSqlCase(referenceTimestamp) {
   let caseStatement = "CASE\n";
   for (const tw of TIME_WINDOWS) {
-    // Calculate boundary relative to the referenceTimestamp
-    const boundaryStartMillis = referenceTimestamp - tw.daysAgoEnd * DAY_MS;
-    // For the "last X days" window (id:0), the end boundary is the referenceTimestamp itself.
-    // For other windows "X-Y days ago", the end boundary is referenceTimestamp - X days.
-    // The condition should be pubMillis >= boundaryStartMillis AND pubMillis < boundaryEndMillis
-    // However, the original logic implies that if pubMillis >= boundary for "daysAgoEnd", it falls into that window.
-    // Let's stick to the original logic structure for assigning to a window based on its "end" (most recent part of the window).
-    // The SQL CASE statement evaluates conditions sequentially.
-    // The order in TIME_WINDOWS (most recent first) is important here.
-    // If an alert is within "last 7 days", its pubMillis will be >= referenceTimestamp - 7*DAY_MS.
-    // If an alert is within "7-14 days ago", its pubMillis will be >= referenceTimestamp - 14*DAY_MS (and < referenceTimestamp - 7*DAY_MS).
-    // The CASE statement handles the exclusivity.
     const boundaryMillisForWindowStart = referenceTimestamp - tw.daysAgoEnd * DAY_MS;
     caseStatement += `  WHEN pubMillis >= ${boundaryMillisForWindowStart} THEN ${tw.id}\n`;
   }
@@ -169,7 +160,6 @@ async function generateTemporalDiversityGridData(db, referenceTimestamp) {
 
   const timeWindowIdCaseSql = getTimeWindowIdSqlCase(referenceTimestamp);
   const oldestTimeWindow = TIME_WINDOWS[TIME_WINDOWS.length - 1];
-  // This defines the absolute oldest alert we care about, relative to the referenceTimestamp
   const oldestRelevantPubMillis = referenceTimestamp - oldestTimeWindow.daysAgoEnd * DAY_MS;
 
   console.log("Temporal Diversity: Fetching alerts with time window IDs from DB...");
@@ -180,7 +170,7 @@ async function generateTemporalDiversityGridData(db, referenceTimestamp) {
     FROM alerts 
     WHERE latitude IS NOT NULL AND longitude IS NOT NULL AND pubMillis >= ? 
   `
-    ) // Only fetch alerts that could possibly fall into any defined time window
+    )
     .all(oldestRelevantPubMillis);
 
   const validAlertsForDiversity = alertsWithSqlTimeWindow.filter((a) => a.timeWindowId !== null);
@@ -199,7 +189,6 @@ async function generateTemporalDiversityGridData(db, referenceTimestamp) {
     if (lonScaled === null || latScaled === null) continue;
     const cellKey = `${lonScaled}_${latScaled}`;
     const currentTWIDInMap = cellMostRecentTimeWindowIdMap.get(cellKey);
-    // A smaller timeWindowId means a more recent window (e.g., "last 7 days" is id 0)
     if (currentTWIDInMap === undefined || alert.timeWindowId < currentTWIDInMap) {
       cellMostRecentTimeWindowIdMap.set(cellKey, alert.timeWindowId);
     }
@@ -324,6 +313,41 @@ async function generateTemporalDiversityGridData(db, referenceTimestamp) {
   console.log("All temporal diversity grid generation complete.");
 }
 
+async function updateMetadata(db, referenceTimestamp) {
+  console.log("Updating metadata...");
+  const insertMetadataStmt = db.prepare(`INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)`);
+
+  // Last grid update timestamp
+  insertMetadataStmt.run("last_grid_update_timestamp", referenceTimestamp.toString());
+
+  // Center coordinates
+  const centerLon = (config.WAZE_AREA_LEFT + config.WAZE_AREA_RIGHT) / 2;
+  const centerLat = (config.WAZE_AREA_BOTTOM + config.WAZE_AREA_TOP) / 2;
+  insertMetadataStmt.run("center_longitude", centerLon.toString());
+  insertMetadataStmt.run("center_latitude", centerLat.toString());
+
+  // Total alerts in time windows
+  let totalAlertsInWindows = 0;
+  if (TIME_WINDOWS.length > 0) {
+    const maxDaysAgoEnd = Math.max(...TIME_WINDOWS.map((tw) => tw.daysAgoEnd));
+    const minDaysAgoStart = Math.min(...TIME_WINDOWS.map((tw) => tw.daysAgoStart)); // Should be 0 for "last X days"
+
+    const overallStartMillis = referenceTimestamp - maxDaysAgoEnd * DAY_MS;
+    const overallEndMillisStrict = referenceTimestamp - minDaysAgoStart * DAY_MS; // This is effectively referenceTimestamp
+
+    const result = db
+      .prepare(
+        `SELECT COUNT(uuid) as total_alerts FROM alerts 
+       WHERE pubMillis >= ? AND pubMillis < ? 
+       AND longitude IS NOT NULL AND latitude IS NOT NULL`
+      )
+      .get(overallStartMillis, overallEndMillisStrict);
+    totalAlertsInWindows = result ? result.total_alerts : 0;
+  }
+  insertMetadataStmt.run("total_alerts_in_time_windows", totalAlertsInWindows.toString());
+  console.log(`Metadata updated: Last Update: ${new Date(referenceTimestamp).toISOString()}, Center: ${centerLat.toFixed(4)},${centerLon.toFixed(4)}, Total Alerts: ${totalAlertsInWindows}`);
+}
+
 // --- Main Update Function ---
 async function updateGrids() {
   const dbPath = require("path").join(CACHE_DIR, DB_FILE);
@@ -335,8 +359,6 @@ async function updateGrids() {
 
   let referenceTimestamp;
   try {
-    // Ensure alerts table exists before querying, though initializeDatabase should handle it.
-    // This is more of a safeguard if initializeDatabase were to change.
     const tableCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='alerts'").get();
     if (!tableCheck) {
       console.warn("Alerts table does not exist. Grid generation will use current time as reference.");
@@ -358,6 +380,7 @@ async function updateGrids() {
 
   await generateDensityGridData(db, referenceTimestamp);
   await generateTemporalDiversityGridData(db, referenceTimestamp);
+  await updateMetadata(db, referenceTimestamp); // Add this call
 
   db.close();
   console.log("All grid data generation and database updates are complete.");
