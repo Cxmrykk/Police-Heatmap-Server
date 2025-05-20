@@ -14,7 +14,7 @@ setInterval(Waze.fetchWazeAlerts, WAZE_UPDATE_INTERVAL_MS);
 setInterval(Grid.updateGrids, GRID_UPDATE_INTERVAL_MS);
 
 async function setup() {
-  //await Waze.fetchWazeAlerts();
+  await Waze.fetchWazeAlerts();
   await Grid.updateGrids();
 }
 
