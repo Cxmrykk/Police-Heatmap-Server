@@ -24,32 +24,14 @@ function scaleCoordinate(coord, precision) {
   return Math.trunc(coord * 10 ** precision);
 }
 
-function normalize(value, min, max, scale = 255) {
-  if (max === min) return min > 0 ? scale : 0;
-  if (value === null || isNaN(value)) return 0;
-  return Math.round(((value - min) / (max - min)) * scale);
-}
-
-function getMinMax(countsMap) {
-  let min = Infinity,
-    max = -Infinity,
-    hasValues = false;
-  for (const val of countsMap.values()) {
-    if (val === null || isNaN(val)) continue;
-    hasValues = true;
-    min = Math.min(min, val);
-    max = Math.max(max, val);
-  }
-  return hasValues ? { min, max } : { min: 0, max: 0 };
-}
-
 function initializeDatabase(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS alerts (uuid TEXT PRIMARY KEY, pubMillis INTEGER, latitude REAL, longitude REAL, confidence INTEGER, reliability INTEGER)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_alerts_pubMillis ON alerts (pubMillis)`);
 
-  db.exec(`DROP TABLE IF EXISTS density_grids`);
-  db.exec(`CREATE TABLE density_grids (time_window_id INTEGER NOT NULL, level INTEGER NOT NULL, lon_scaled INTEGER NOT NULL, lat_scaled INTEGER NOT NULL, density INTEGER NOT NULL, PRIMARY KEY (time_window_id, level, lon_scaled, lat_scaled))`);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_density_grids_coords ON density_grids (time_window_id, level, lon_scaled, lat_scaled)`);
+  // Density grids table removed
+  // db.exec(`DROP TABLE IF EXISTS density_grids`);
+  // db.exec(`CREATE TABLE density_grids (time_window_id INTEGER NOT NULL, level INTEGER NOT NULL, lon_scaled INTEGER NOT NULL, lat_scaled INTEGER NOT NULL, density INTEGER NOT NULL, PRIMARY KEY (time_window_id, level, lon_scaled, lat_scaled))`);
+  // db.exec(`CREATE INDEX IF NOT EXISTS idx_density_grids_coords ON density_grids (time_window_id, level, lon_scaled, lat_scaled)`);
 
   db.exec(`DROP TABLE IF EXISTS temporal_diversity_grids`);
   db.exec(`
@@ -68,81 +50,7 @@ function initializeDatabase(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)`);
 }
 
-// --- Density Grid Generation Logic ---
-function processTimeWindowForDensity(db, windowDef, referenceTimestamp) {
-  const startMillis = referenceTimestamp - windowDef.daysAgoEnd * DAY_MS;
-  const endMillisStrict = referenceTimestamp - windowDef.daysAgoStart * DAY_MS;
-  // console.log(`Density: Processing time window: ${windowDef.name} (ID: ${windowDef.id})`);
-  const reports = db
-    .prepare(
-      `SELECT longitude, latitude FROM alerts 
-         WHERE pubMillis >= ? AND pubMillis < ? 
-         AND longitude IS NOT NULL AND latitude IS NOT NULL`
-    )
-    .all(startMillis, endMillisStrict);
-  if (reports.length === 0) {
-    // console.log(`Density: No alert data for window ${windowDef.id}. Skipping.`);
-    return null;
-  }
-  // console.log(`Density: Found ${reports.length} valid reports for window ${windowDef.id}.`);
-  return reports;
-}
-function processPrecisionLevelForDensity(reports, level, windowId) {
-  const cellCounts = new Map();
-  for (const report of reports) {
-    const lonScaled = scaleCoordinate(report.longitude, level);
-    const latScaled = scaleCoordinate(report.latitude, level);
-    if (lonScaled === null || latScaled === null) continue;
-    const key = `${lonScaled}_${latScaled}`;
-    cellCounts.set(key, (cellCounts.get(key) || 0) + 1);
-  }
-  if (cellCounts.size === 0) return null;
-  return cellCounts;
-}
-function prepareDensityInserts(cellCounts, level, windowId) {
-  const logScaledCounts = new Map();
-  cellCounts.forEach((count, key) => {
-    logScaledCounts.set(key, Math.log1p(count));
-  });
-  const { min, max } = getMinMax(logScaledCounts);
-  const inserts = [];
-  cellCounts.forEach((_, key) => {
-    const [lonStr, latStr] = key.split("_");
-    const logScaledValue = logScaledCounts.get(key);
-    const density = normalize(logScaledValue, min, max);
-    if (density > 0) {
-      inserts.push({ time_window_id: windowId, level, lon_scaled: Number(lonStr), lat_scaled: Number(latStr), density });
-    }
-  });
-  return inserts;
-}
-async function generateDensityGridData(db, referenceTimestamp) {
-  console.log("Starting density grid generation...");
-  const insertStmt = db.prepare(`INSERT INTO density_grids (time_window_id, level, lon_scaled, lat_scaled, density) VALUES (?, ?, ?, ?, ?)`);
-  const bulkInsert = db.transaction((items) => {
-    for (const item of items) {
-      insertStmt.run(item.time_window_id, item.level, item.lon_scaled, item.lat_scaled, item.density);
-    }
-  });
-  for (const windowDef of TIME_WINDOWS) {
-    const validReports = processTimeWindowForDensity(db, windowDef, referenceTimestamp);
-    if (!validReports) continue;
-    console.log(`Density: Processing window ${windowDef.id}, level ${PRECISION.MAX} down to ${PRECISION.MIN}. Reports: ${validReports.length}`);
-    for (let level = PRECISION.MAX; level >= PRECISION.MIN; level--) {
-      const cellCounts = processPrecisionLevelForDensity(validReports, level, windowDef.id);
-      if (!cellCounts) continue;
-      const inserts = prepareDensityInserts(cellCounts, level, windowDef.id);
-      if (inserts.length > 0) {
-        try {
-          bulkInsert(inserts); /* console.log(`Density: Inserted ${inserts.length} for L${level}, W${windowDef.id}.`); */
-        } catch (error) {
-          console.error(`Density: Error L${level}, W${windowDef.id}:`, error);
-        }
-      }
-    }
-  }
-  console.log("Density grid generation complete.");
-}
+// --- Density Grid Generation Logic (REMOVED) ---
 
 // --- Temporal Diversity Grid Generation Logic ---
 function getTimeWindowIdSqlCase(referenceTimestamp) {
@@ -378,7 +286,7 @@ async function updateGrids() {
     referenceTimestamp = Date.now();
   }
 
-  await generateDensityGridData(db, referenceTimestamp);
+  // await generateDensityGridData(db, referenceTimestamp); // Removed
   await generateTemporalDiversityGridData(db, referenceTimestamp);
   await updateMetadata(db, referenceTimestamp); // Add this call
 

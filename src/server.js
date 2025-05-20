@@ -27,55 +27,12 @@ function startServer() {
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
   } catch (error) {
-    // Attempt to create the directory if it doesn't exist, then check for DB
-    // This is more relevant if the DB is created by this process on first run
-    // but grid.js is expected to create it.
-    // For now, we assume if HEATMAP_CACHE_DIR_PATH is valid, db should exist after grid run.
     console.error(`FATAL: Could not open database at ${dbPath}. Ensure the path is correct and the database file exists (it should be created by the grid generation process). Error: ${error.message}`);
     process.exit(1);
   }
 
   const app = express();
   app.use(express.json());
-
-  const handleDensityRequest = (req, res) => {
-    const { time_window_id, level, min_lon, min_lat, max_lon, max_lat } = req.query;
-    const queryTimeWindowId = parseInt(time_window_id, 10);
-    const queryLevel = parseInt(level, 10);
-    const queryMinLon = parseFloat(min_lon);
-    const queryMinLat = parseFloat(min_lat);
-    const queryMaxLon = parseFloat(max_lon);
-    const queryMaxLat = parseFloat(max_lat);
-    const numberOfTimeWindows = config.TIME_WINDOWS ? config.TIME_WINDOWS.length : 4; // TIME_WINDOWS is not in config.js, it's in grid.js. Defaulting to 4.
-
-    if (isNaN(queryTimeWindowId) || queryTimeWindowId < 0 || queryTimeWindowId >= numberOfTimeWindows || isNaN(queryLevel) || queryLevel < 0 || queryLevel > MAX_PRECISION_LEVEL || isNaN(queryMinLon) || isNaN(queryMinLat) || isNaN(queryMaxLon) || isNaN(queryMaxLat)) {
-      return res.status(400).json({ error: "Invalid query parameters for density" });
-    }
-    const lonScaledMin = getScaledIntCoordinate(queryMinLon, queryLevel);
-    const latScaledMin = getScaledIntCoordinate(queryMinLat, queryLevel);
-    const lonScaledMax = getScaledIntCoordinate(queryMaxLon, queryLevel);
-    const latScaledMax = getScaledIntCoordinate(queryMaxLat, queryLevel);
-    try {
-      const stmt = db.prepare(`
-        SELECT lon_scaled, lat_scaled, density as density_value
-        FROM density_grids
-        WHERE time_window_id = @time_window_id AND level = @level
-          AND lon_scaled >= @lonScaledMin AND lon_scaled <= @lonScaledMax
-          AND lat_scaled >= @latScaledMin AND lat_scaled <= @latScaledMax
-          AND density > 0
-      `);
-      const results = stmt.all({ time_window_id: queryTimeWindowId, level: queryLevel, lonScaledMin, latScaledMin, lonScaledMax, latScaledMax });
-      const formattedResults = results.map((row) => ({
-        lon: getFloatCoordinateFromScaled(row.lon_scaled, queryLevel),
-        lat: getFloatCoordinateFromScaled(row.lat_scaled, queryLevel),
-        density: row.density_value,
-      }));
-      res.json(formattedResults);
-    } catch (error) {
-      console.error(`Error retrieving density data:`, error);
-      res.status(500).json({ error: `Failed to retrieve density data` });
-    }
-  };
 
   const handleTemporalDiversityRequest = (req, res) => {
     const { radius_group_id, level, min_lon, min_lat, max_lon, max_lat } = req.query;
@@ -140,7 +97,6 @@ function startServer() {
       res.json(metadata);
     } catch (error) {
       console.error(`Error retrieving metadata:`, error);
-      // Check if the table exists, as this is a common issue on first run if grid.js hasn't completed.
       if (error.message.includes("no such table: metadata")) {
         console.warn("Metadata table not found. It might be the first run or grid update is pending.");
         return res.status(404).json({ error: "Metadata not available yet. Please try again later." });
@@ -149,20 +105,12 @@ function startServer() {
     }
   };
 
-  app.get("/api/density", handleDensityRequest);
   app.get("/api/diversity", handleTemporalDiversityRequest);
-  app.get("/api/metadata", handleMetadataRequest); // New metadata endpoint
+  app.get("/api/metadata", handleMetadataRequest);
 
   app.listen(API_PORT, () => {
     console.log(`API Server listening on port ${API_PORT}`);
   });
 }
-
-// This was a temporary fix for config.TIME_WINDOWS, which is not defined in config.js
-// It's better to rely on the actual number of time windows from grid.js or make it configurable.
-// For now, the density endpoint uses a default of 4 if config.TIME_WINDOWS is not found.
-// if (!config.TIME_WINDOWS) {
-//   config.TIME_WINDOWS = [{}, {}, {}, {}];
-// }
 
 module.exports = { startServer };
