@@ -7,6 +7,7 @@ const envSettings = [
   { key: "WAZE_AREA_RIGHT", type: "float", required: true },
   { key: "WAZE_QUERY_DELAY_MS", type: "integer", required: true },
   { key: "API_PORT", type: "integer", required: false, default: 3000 },
+  { key: "DB_FILENAME", type: "string", required: false, default: "alerts.sqlite" },
 ];
 
 const config = {};
@@ -60,7 +61,5 @@ if (errors.length > 0) {
   errors.forEach((err) => console.error(`- ${err}`));
   process.exit(1);
 }
-
-config.DB_FILENAME = "alerts.sqlite";
 
 module.exports = config;
