@@ -8,6 +8,8 @@ const envSettings = [
   { key: "WAZE_QUERY_DELAY_MS", type: "integer", required: true },
   { key: "API_PORT", type: "integer", required: false, default: 3000 },
   { key: "DB_FILENAME", type: "string", required: false, default: "alerts.sqlite" },
+  { key: "WAZE_UPDATE_INTERVAL_MS", type: "integer", required: false, default: 1000 * 60 * 10 },
+  { key: "GRID_UPDATE_INTERVAL_MS", type: "integer", required: false, default: 1000 * 60 * 60 * 24 },
 ];
 
 const config = {};
