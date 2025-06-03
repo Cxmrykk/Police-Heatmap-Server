@@ -2,6 +2,7 @@ const Database = require("better-sqlite3");
 const Path = require("path");
 const Axios = require("axios");
 const config = require("./config");
+const Log = require("./log")
 
 // Configuration (now from config module)
 const MAX_ALERTS = config.WAZE_MAX_ALERTS;
@@ -33,7 +34,7 @@ async function getData(top, bottom, left, right) {
     const response = await Axios.get(`https://www.waze.com/live-map/api/georss?top=${top}&bottom=${bottom}&left=${left}&right=${right}&env=row&types=alerts`);
     return response.data;
   } catch (error) {
-    console.error(`API Request Error: ${error.message} for area T:${top},B:${bottom},L:${left},R:${right}`);
+    Log.error(`API Request Error: ${error.message} for area T:${top},B:${bottom},L:${left},R:${right}`);
     return null;
   }
 }
@@ -64,7 +65,7 @@ async function fetchWazeAlerts() {
     const data = await getData(currentArea.top, currentArea.bottom, currentArea.left, currentArea.right);
     if (!data) continue;
     if (data.error) {
-      console.error(`Waze API Error: ${data.error}`);
+      Log.error(`Waze API Error: ${data.error}`);
       continue;
     }
     if (!data.alerts || !Array.isArray(data.alerts)) continue;

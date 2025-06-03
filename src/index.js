@@ -4,9 +4,10 @@ const config = require("./config");
 const fs = require("fs");
 const Path = require("path");
 
+const Server = require("./server");
 const Waze = require("./waze");
 const Grid = require("./grid");
-const Server = require("./server");
+const Log = require("./log")
 
 const WAZE_UPDATE_INTERVAL_MS = config.WAZE_UPDATE_INTERVAL_MS;
 const GRID_UPDATE_INTERVAL_MS = config.GRID_UPDATE_INTERVAL_MS;
@@ -26,10 +27,10 @@ const taskRunningFlags = {
 try {
   if (!fs.existsSync(config.HEATMAP_CACHE_DIR_PATH)) {
     fs.mkdirSync(config.HEATMAP_CACHE_DIR_PATH, { recursive: true });
-    console.log(`Created cache directory: ${config.HEATMAP_CACHE_DIR_PATH}`);
+    Log.info(`Created cache directory: ${config.HEATMAP_CACHE_DIR_PATH}`);
   }
 } catch (error) {
-  console.error(`FATAL: Error creating cache directory ${config.HEATMAP_CACHE_DIR_PATH}:`, error);
+  Log.error(`FATAL: Error creating cache directory ${config.HEATMAP_CACHE_DIR_PATH}:`, error);
   process.exit(1);
 }
 
@@ -40,14 +41,14 @@ function readTimestamps() {
       const parsedData = JSON.parse(data);
       for (const taskKey of [WAZE_TASK_NAME, GRID_TASK_NAME]) {
         if (parsedData[taskKey] && (typeof parsedData[taskKey].lastAttemptedStart !== "number" || (parsedData[taskKey].lastCompletion !== undefined && typeof parsedData[taskKey].lastCompletion !== "number"))) {
-          console.warn(`Timestamp data for ${taskKey} has unexpected structure. Resetting for this task.`);
+          Log.warn(`Timestamp data for ${taskKey} has unexpected structure. Resetting for this task.`);
           delete parsedData[taskKey];
         }
       }
       return parsedData;
     }
   } catch (error) {
-    console.warn(`Warning: Could not read or parse timestamp file (${TIMESTAMP_FILE_PATH}): ${error.message}. Assuming no prior executions.`);
+    Log.warn(`Warning: Could not read or parse timestamp file (${TIMESTAMP_FILE_PATH}): ${error.message}. Assuming no prior executions.`);
   }
   return {};
 }
@@ -56,13 +57,13 @@ function writeTimestamps(timestamps) {
   try {
     fs.writeFileSync(TIMESTAMP_FILE_PATH, JSON.stringify(timestamps, null, 2), "utf8");
   } catch (error) {
-    console.error(`Error writing timestamp file (${TIMESTAMP_FILE_PATH}):`, error);
+    Log.error(`Error writing timestamp file (${TIMESTAMP_FILE_PATH}):`, error);
   }
 }
 
 async function runTaskIfDue(taskName, taskFunction, intervalMs) {
   if (taskRunningFlags[taskName]) {
-    console.log(`${taskName} is already running. Skipping this interval check.`);
+    Log.info(`${taskName} is already running. Skipping this interval check.`);
     return;
   }
 
@@ -82,13 +83,13 @@ async function runTaskIfDue(taskName, taskFunction, intervalMs) {
     if (!canRunAfterMinCompletionDelay) {
       const timeToWaitMs = MINIMUM_POST_COMPLETION_INTERVAL_MS - timeSinceLastCompletion;
       const secondsToWait = Math.ceil(timeToWaitMs / 1000);
-      console.log(`${taskName}: Main interval passed, but waiting for minimum post-completion delay of ${MINIMUM_POST_COMPLETION_INTERVAL_MS / 1000}s. Last completion: ${new Date(lastCompletion).toISOString()}. Need to wait approx. ${secondsToWait} more sec(s).`);
+      Log.info(`${taskName}: Main interval passed, but waiting for minimum post-completion delay of ${MINIMUM_POST_COMPLETION_INTERVAL_MS / 1000}s. Last completion: ${new Date(lastCompletion).toISOString()}. Need to wait approx. ${secondsToWait} more sec(s).`);
       return;
     }
 
     taskRunningFlags[taskName] = true;
     const lastAttemptStr = lastAttemptedStart === 0 ? "Never" : new Date(lastAttemptedStart).toISOString();
-    console.log(`Executing ${taskName}: Conditions met. Last attempt: ${lastAttemptStr}. Current time: ${new Date(now).toISOString()}`);
+    Log.info(`Executing ${taskName}: Conditions met. Last attempt: ${lastAttemptStr}. Current time: ${new Date(now).toISOString()}`);
 
     const updatedTaskTimestamps = {
       lastAttemptedStart: now,
@@ -102,9 +103,9 @@ async function runTaskIfDue(taskName, taskFunction, intervalMs) {
       const executionCompletionTime = Date.now();
       updatedTaskTimestamps.lastCompletion = executionCompletionTime;
       writeTimestamps(allTimestamps);
-      console.log(`${taskName} executed successfully. Completion timestamp updated to ${new Date(executionCompletionTime).toISOString()}.`);
+      Log.info(`${taskName} executed successfully. Completion timestamp updated to ${new Date(executionCompletionTime).toISOString()}.`);
     } catch (error) {
-      console.error(`Error executing ${taskName}:`, error);
+      Log.error(`Error executing ${taskName}:`, error);
     } finally {
       taskRunningFlags[taskName] = false;
     }
@@ -112,23 +113,23 @@ async function runTaskIfDue(taskName, taskFunction, intervalMs) {
     const timeToWaitMs = intervalMs - timeSinceLastAttempt;
     const secondsToWait = Math.ceil(timeToWaitMs / 1000);
     const lastAttemptStr = lastAttemptedStart === 0 ? "Never (or no timestamp)" : new Date(lastAttemptedStart).toISOString();
-    console.log(`${taskName} not due yet (main interval). Last attempt: ${lastAttemptStr}. Will be due in approximately ${secondsToWait} sec(s).`);
+    Log.info(`${taskName} not due yet (main interval). Last attempt: ${lastAttemptStr}. Will be due in approximately ${secondsToWait} sec(s).`);
   }
 }
 
 setInterval(() => {
-  runTaskIfDue(WAZE_TASK_NAME, Waze.fetchWazeAlerts, WAZE_UPDATE_INTERVAL_MS).catch((err) => console.error(`Error in scheduled execution wrapper for ${WAZE_TASK_NAME}:`, err));
+  runTaskIfDue(WAZE_TASK_NAME, Waze.fetchWazeAlerts, WAZE_UPDATE_INTERVAL_MS).catch((err) => Log.error(`Error in scheduled execution wrapper for ${WAZE_TASK_NAME}:`, err));
 }, WAZE_UPDATE_INTERVAL_MS);
 
 setInterval(() => {
-  runTaskIfDue(GRID_TASK_NAME, Grid.updateGrids, GRID_UPDATE_INTERVAL_MS).catch((err) => console.error(`Error in scheduled execution wrapper for ${GRID_TASK_NAME}:`, err));
+  runTaskIfDue(GRID_TASK_NAME, Grid.updateGrids, GRID_UPDATE_INTERVAL_MS).catch((err) => Log.error(`Error in scheduled execution wrapper for ${GRID_TASK_NAME}:`, err));
 }, GRID_UPDATE_INTERVAL_MS);
 
 async function setup() {
-  console.log("Running initial setup checks for tasks...");
+  Log.info("Running initial setup checks for tasks...");
   await runTaskIfDue(WAZE_TASK_NAME, Waze.fetchWazeAlerts, WAZE_UPDATE_INTERVAL_MS);
   await runTaskIfDue(GRID_TASK_NAME, Grid.updateGrids, GRID_UPDATE_INTERVAL_MS);
-  console.log("Initial setup checks complete.");
+  Log.info("Initial setup checks complete.");
 }
 
 async function main() {
@@ -137,6 +138,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("FATAL: Unhandled error in main application execution:", error);
+  Log.error("FATAL: Unhandled error in main application execution:", error);
   process.exit(1);
 });

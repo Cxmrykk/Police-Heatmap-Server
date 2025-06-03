@@ -2,6 +2,7 @@ const express = require("express");
 const Database = require("better-sqlite3");
 const Path = require("path");
 const config = require("./config");
+const Log = require("./log")
 
 const CACHE_DIR_PATH = config.HEATMAP_CACHE_DIR_PATH;
 const DB_FILENAME = config.DB_FILENAME;
@@ -27,7 +28,7 @@ function startServer() {
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
   } catch (error) {
-    console.error(`FATAL: Could not open database at ${dbPath}. Ensure the path is correct and the database file exists (it should be created by the grid generation process). Error: ${error.message}`);
+    Log.error(`FATAL: Could not open database at ${dbPath}. Ensure the path is correct and the database file exists (it should be created by the grid generation process). Error: ${error.message}`);
     process.exit(1);
   }
 
@@ -81,7 +82,7 @@ function startServer() {
       }));
       res.json(formattedResults);
     } catch (error) {
-      console.error(`Error retrieving temporal diversity data:`, error);
+      Log.error(`Error retrieving temporal diversity data:`, error);
       res.status(500).json({ error: `Failed to retrieve temporal diversity data` });
     }
   };
@@ -96,9 +97,9 @@ function startServer() {
       }, {});
       res.json(metadata);
     } catch (error) {
-      console.error(`Error retrieving metadata:`, error);
+      Log.error(`Error retrieving metadata:`, error);
       if (error.message.includes("no such table: metadata")) {
-        console.warn("Metadata table not found. It might be the first run or grid update is pending.");
+        Log.warn("Metadata table not found. It might be the first run or grid update is pending.");
         return res.status(404).json({ error: "Metadata not available yet. Please try again later." });
       }
       res.status(500).json({ error: `Failed to retrieve metadata` });
@@ -109,7 +110,7 @@ function startServer() {
   app.get("/api/metadata", handleMetadataRequest);
 
   app.listen(API_PORT, () => {
-    console.log(`API Server listening on port ${API_PORT}`);
+    Log.info(`API Server listening on port ${API_PORT}`);
   });
 }
 

@@ -1,5 +1,6 @@
 const Database = require("better-sqlite3");
 const config = require("./config");
+const Log = require("./log")
 
 // Constants
 const PRECISION = { MAX: 5, MIN: 0 };
@@ -64,13 +65,13 @@ function getTimeWindowIdSqlCase(referenceTimestamp) {
 }
 
 async function generateTemporalDiversityGridData(db, referenceTimestamp) {
-  console.log("Starting temporal diversity grid generation for multiple radii...");
+  Log.info("Starting temporal diversity grid generation for multiple radii...");
 
   const timeWindowIdCaseSql = getTimeWindowIdSqlCase(referenceTimestamp);
   const oldestTimeWindow = TIME_WINDOWS[TIME_WINDOWS.length - 1];
   const oldestRelevantPubMillis = referenceTimestamp - oldestTimeWindow.daysAgoEnd * DAY_MS;
 
-  console.log("Temporal Diversity: Fetching alerts with time window IDs from DB...");
+  Log.info("Temporal Diversity: Fetching alerts with time window IDs from DB...");
   const alertsWithSqlTimeWindow = db
     .prepare(
       `
@@ -82,14 +83,14 @@ async function generateTemporalDiversityGridData(db, referenceTimestamp) {
     .all(oldestRelevantPubMillis);
 
   const validAlertsForDiversity = alertsWithSqlTimeWindow.filter((a) => a.timeWindowId !== null);
-  console.log(`Temporal Diversity: ${validAlertsForDiversity.length} alerts successfully assigned to a time window.`);
+  Log.info(`Temporal Diversity: ${validAlertsForDiversity.length} alerts successfully assigned to a time window.`);
 
   if (validAlertsForDiversity.length === 0) {
-    console.log("Temporal Diversity: No alerts with time window data to process. Skipping.");
+    Log.info("Temporal Diversity: No alerts with time window data to process. Skipping.");
     return;
   }
 
-  console.log("Temporal Diversity: Building map of most recent time window IDs per cell...");
+  Log.info("Temporal Diversity: Building map of most recent time window IDs per cell...");
   const cellMostRecentTimeWindowIdMap = new Map();
   for (const alert of validAlertsForDiversity) {
     const lonScaled = scaleCoordinate(alert.longitude, PRECISION.MAX);
@@ -101,7 +102,7 @@ async function generateTemporalDiversityGridData(db, referenceTimestamp) {
       cellMostRecentTimeWindowIdMap.set(cellKey, alert.timeWindowId);
     }
   }
-  console.log(`Temporal Diversity: Built map with ${cellMostRecentTimeWindowIdMap.size} cells at PRECISION.MAX.`);
+  Log.info(`Temporal Diversity: Built map with ${cellMostRecentTimeWindowIdMap.size} cells at PRECISION.MAX.`);
 
   const insertStmt = db.prepare(`
     INSERT INTO temporal_diversity_grids (radius_group_id, level, lon_scaled, lat_scaled, diversity_score)
@@ -117,7 +118,7 @@ async function generateTemporalDiversityGridData(db, referenceTimestamp) {
 
   for (let radiusGroupId = 0; radiusGroupId < DIVERSITY_RADII.length; radiusGroupId++) {
     const currentRadius = DIVERSITY_RADII[radiusGroupId];
-    console.log(`\nTemporal Diversity: Processing for radius group ${radiusGroupId} (radius: ${currentRadius})...`);
+    Log.info(`\nTemporal Diversity: Processing for radius group ${radiusGroupId} (radius: ${currentRadius})...`);
 
     const levelMaxCellDiversity = new Map();
     const neighborhoodHalfWidthInCells = Math.floor(currentRadius / cellResolution);
@@ -164,7 +165,7 @@ async function generateTemporalDiversityGridData(db, referenceTimestamp) {
       }
     }
     process.stdout.write("\n");
-    console.log(`Temporal Diversity (Radius Group ${radiusGroupId}): Finished. Found ${levelMaxCellDiversity.size} cells with scores at level ${PRECISION.MAX}.`);
+    Log.info(`Temporal Diversity (Radius Group ${radiusGroupId}): Finished. Found ${levelMaxCellDiversity.size} cells with scores at level ${PRECISION.MAX}.`);
 
     const levelMaxInserts = [];
     levelMaxCellDiversity.forEach((score, key) => {
@@ -177,12 +178,12 @@ async function generateTemporalDiversityGridData(db, referenceTimestamp) {
     if (levelMaxInserts.length > 0) {
       try {
         bulkInsertDiversity(levelMaxInserts);
-        console.log(`Temporal Diversity (Radius Group ${radiusGroupId}): Inserted ${levelMaxInserts.length} records for level ${PRECISION.MAX}.`);
+        Log.info(`Temporal Diversity (Radius Group ${radiusGroupId}): Inserted ${levelMaxInserts.length} records for level ${PRECISION.MAX}.`);
       } catch (error) {
-        console.error(`Temporal Diversity (Radius Group ${radiusGroupId}): Error L${PRECISION.MAX}:`, error);
+        Log.error(`Temporal Diversity (Radius Group ${radiusGroupId}): Error L${PRECISION.MAX}:`, error);
       }
     } else {
-      console.log(`Temporal Diversity (Radius Group ${radiusGroupId}): No records to insert for level ${PRECISION.MAX}.`);
+      Log.info(`Temporal Diversity (Radius Group ${radiusGroupId}): No records to insert for level ${PRECISION.MAX}.`);
     }
 
     for (let level = PRECISION.MAX - 1; level >= PRECISION.MIN; level--) {
@@ -212,17 +213,17 @@ async function generateTemporalDiversityGridData(db, referenceTimestamp) {
         try {
           bulkInsertDiversity(currentLevelInserts);
         } catch (error) {
-          console.error(`Error L${level}, RG${radiusGroupId}:`, error);
+          Log.error(`Error L${level}, RG${radiusGroupId}:`, error);
         }
       }
     }
-    console.log(`Temporal Diversity (Radius Group ${radiusGroupId}): Aggregation complete.`);
+    Log.info(`Temporal Diversity (Radius Group ${radiusGroupId}): Aggregation complete.`);
   }
-  console.log("All temporal diversity grid generation complete.");
+  Log.info("All temporal diversity grid generation complete.");
 }
 
 async function updateMetadata(db, referenceTimestamp) {
-  console.log("Updating metadata...");
+  Log.info("Updating metadata...");
   const insertMetadataStmt = db.prepare(`INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)`);
 
   // Last grid update timestamp
@@ -253,13 +254,13 @@ async function updateMetadata(db, referenceTimestamp) {
     totalAlertsInWindows = result ? result.total_alerts : 0;
   }
   insertMetadataStmt.run("total_alerts_in_time_windows", totalAlertsInWindows.toString());
-  console.log(`Metadata updated: Last Update: ${new Date(referenceTimestamp).toISOString()}, Center: ${centerLat.toFixed(4)},${centerLon.toFixed(4)}, Total Alerts: ${totalAlertsInWindows}`);
+  Log.info(`Metadata updated: Last Update: ${new Date(referenceTimestamp).toISOString()}, Center: ${centerLat.toFixed(4)},${centerLon.toFixed(4)}, Total Alerts: ${totalAlertsInWindows}`);
 }
 
 // --- Main Update Function ---
 async function updateGrids() {
   const dbPath = require("path").join(CACHE_DIR, DB_FILE);
-  console.log(`Using database at: ${dbPath}`);
+  Log.info(`Using database at: ${dbPath}`);
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
 
@@ -269,20 +270,20 @@ async function updateGrids() {
   try {
     const tableCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='alerts'").get();
     if (!tableCheck) {
-      console.warn("Alerts table does not exist. Grid generation will use current time as reference.");
+      Log.warn("Alerts table does not exist. Grid generation will use current time as reference.");
       referenceTimestamp = Date.now();
     } else {
       const maxPubMillisRow = db.prepare("SELECT MAX(pubMillis) as max_millis FROM alerts").get();
       if (maxPubMillisRow && maxPubMillisRow.max_millis != null) {
         referenceTimestamp = maxPubMillisRow.max_millis;
-        console.log(`Using latest alert pubMillis as reference timestamp: ${new Date(referenceTimestamp).toISOString()} (${referenceTimestamp})`);
+        Log.info(`Using latest alert pubMillis as reference timestamp: ${new Date(referenceTimestamp).toISOString()} (${referenceTimestamp})`);
       } else {
         referenceTimestamp = Date.now();
-        console.warn("No alerts found or max pubMillis is NULL. Falling back to current time as reference for grid generation: " + new Date(referenceTimestamp).toISOString());
+        Log.warn("No alerts found or max pubMillis is NULL. Falling back to current time as reference for grid generation: " + new Date(referenceTimestamp).toISOString());
       }
     }
   } catch (error) {
-    console.error("Error determining reference timestamp from database. Falling back to current time.", error);
+    Log.error("Error determining reference timestamp from database. Falling back to current time.", error);
     referenceTimestamp = Date.now();
   }
 
@@ -291,7 +292,7 @@ async function updateGrids() {
   await updateMetadata(db, referenceTimestamp); // Add this call
 
   db.close();
-  console.log("All grid data generation and database updates are complete.");
+  Log.info("All grid data generation and database updates are complete.");
 }
 
 module.exports = { updateGrids };

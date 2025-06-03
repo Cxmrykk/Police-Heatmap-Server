@@ -1,3 +1,5 @@
+const Log = require("./log")
+
 const envSettings = [
   { key: "HEATMAP_CACHE_DIR_PATH", type: "string", required: true, validate: (val) => val && val.length > 0, errorMsg: "must be a non-empty string" },
   { key: "WAZE_MAX_ALERTS", type: "integer", required: true },
@@ -59,8 +61,8 @@ envSettings.forEach((setting) => {
 });
 
 if (errors.length > 0) {
-  console.error("FATAL: Environment variable configuration errors:");
-  errors.forEach((err) => console.error(`- ${err}`));
+  Log.error("FATAL: Environment variable configuration errors:");
+  errors.forEach((err) => Log.error(`- ${err}`));
   process.exit(1);
 }
 
