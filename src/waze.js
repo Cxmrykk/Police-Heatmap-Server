@@ -2,7 +2,7 @@ const Database = require("better-sqlite3");
 const Path = require("path");
 const Axios = require("axios");
 const config = require("./config");
-const Log = require("./log")
+const Log = require("./log");
 
 // Configuration (now from config module)
 const MAX_ALERTS = config.WAZE_MAX_ALERTS;
@@ -49,16 +49,24 @@ const insertAlertStmt = db.prepare(`INSERT OR IGNORE INTO alerts (uuid, pubMilli
 
 function usePoliceData(data) {
   if (!data || !data.alerts || !Array.isArray(data.alerts)) return;
+  let policeCount = 0;
   for (const alert of data.alerts) {
     if (alert.type === "POLICE") {
       insertAlertStmt.run(alert.uuid, alert.pubMillis, alert.location.y, alert.location.x, alert.confidence, alert.reliability);
+      policeCount++;
     }
+  }
+  if (policeCount > 0) {
+    Log.info(`Stored ${policeCount} police alerts`);
   }
 }
 
 async function fetchWazeAlerts() {
+  Log.info(`Starting Waze alerts fetch for area: T:${AREA_TOP}, B:${AREA_BOTTOM}, L:${AREA_LEFT}, R:${AREA_RIGHT}`);
   const queue = [];
   queue.push(new Area(AREA_TOP, AREA_BOTTOM, AREA_LEFT, AREA_RIGHT));
+  let areasProcessed = 0;
+  let areasSplit = 0;
 
   while (queue.length > 0) {
     const currentArea = queue.pop();
@@ -72,14 +80,19 @@ async function fetchWazeAlerts() {
 
     if (data.alerts.length >= MAX_ALERTS) {
       queue.push(...splitData(currentArea.top, currentArea.bottom, currentArea.left, currentArea.right));
+      areasSplit++;
+      Log.info(`Area split due to ${data.alerts.length} alerts (>= ${MAX_ALERTS}). Queue size: ${queue.length}`);
     } else {
       usePoliceData(data);
+      areasProcessed++;
     }
 
     if (QUERY_DELAY_MS > 0 && queue.length > 0) {
       await new Promise((resolve) => setTimeout(resolve, QUERY_DELAY_MS));
     }
   }
+
+  Log.info(`Waze fetch completed. Areas processed: ${areasProcessed}, Areas split: ${areasSplit}`);
 }
 
 module.exports = { fetchWazeAlerts };
