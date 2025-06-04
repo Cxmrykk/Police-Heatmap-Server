@@ -3,11 +3,10 @@ const config = require("./config");
 
 const fs = require("fs");
 const Path = require("path");
+const { fork } = require("child_process");
 
 const Server = require("./server");
-const Waze = require("./waze");
-const Grid = require("./grid");
-const Log = require("./log")
+const Log = require("./log");
 
 const WAZE_UPDATE_INTERVAL_MS = config.WAZE_UPDATE_INTERVAL_MS;
 const GRID_UPDATE_INTERVAL_MS = config.GRID_UPDATE_INTERVAL_MS;
@@ -18,6 +17,10 @@ const TIMESTAMP_FILE_PATH = Path.join(config.HEATMAP_CACHE_DIR_PATH, "last_execu
 
 const WAZE_TASK_NAME = "waze_alerts_fetch";
 const GRID_TASK_NAME = "grid_data_update";
+
+// Paths to runner scripts
+const WAZE_RUNNER_PATH = Path.resolve(__dirname, "waze-runner.js");
+const GRID_RUNNER_PATH = Path.resolve(__dirname, "grid-runner.js");
 
 const taskRunningFlags = {
   [WAZE_TASK_NAME]: false,
@@ -61,7 +64,7 @@ function writeTimestamps(timestamps) {
   }
 }
 
-async function runTaskIfDue(taskName, taskFunction, intervalMs) {
+async function runTaskIfDue(taskName, taskRunnerPath, intervalMs) {
   if (taskRunningFlags[taskName]) {
     Log.info(`${taskName} is already running. Skipping this interval check.`);
     return;
@@ -93,22 +96,37 @@ async function runTaskIfDue(taskName, taskFunction, intervalMs) {
 
     const updatedTaskTimestamps = {
       lastAttemptedStart: now,
-      lastCompletion: lastCompletion,
+      lastCompletion: lastCompletion, // Preserve old completion until new one is confirmed
     };
     allTimestamps[taskName] = updatedTaskTimestamps;
-    writeTimestamps(allTimestamps);
+    writeTimestamps(allTimestamps); // Write attempt time
 
-    try {
-      await taskFunction();
+    Log.info(`Forking child process for ${taskName} from ${taskRunnerPath}...`);
+    const child = fork(taskRunnerPath, [], { stdio: "inherit" }); // 'inherit' to see child logs
+
+    child.on("exit", (code) => {
       const executionCompletionTime = Date.now();
-      updatedTaskTimestamps.lastCompletion = executionCompletionTime;
-      writeTimestamps(allTimestamps);
-      Log.info(`${taskName} executed successfully. Completion timestamp updated to ${new Date(executionCompletionTime).toISOString()}.`);
-    } catch (error) {
-      Log.error(`Error executing ${taskName}:`, error);
-    } finally {
+      if (code === 0) {
+        Log.info(`${taskName} child process exited successfully (code 0).`);
+        // Read timestamps again to ensure we have the latest, then update completion
+        const currentTimestamps = readTimestamps();
+        const taskSpecificTimestamps = currentTimestamps[taskName] || { lastAttemptedStart: now };
+        taskSpecificTimestamps.lastCompletion = executionCompletionTime;
+        currentTimestamps[taskName] = taskSpecificTimestamps;
+        writeTimestamps(currentTimestamps);
+        Log.info(`${taskName} executed successfully. Completion timestamp updated to ${new Date(executionCompletionTime).toISOString()}.`);
+      } else {
+        Log.error(`${taskName} child process exited with error code ${code}. Last completion time not updated.`);
+      }
       taskRunningFlags[taskName] = false;
-    }
+    });
+
+    child.on("error", (error) => {
+      Log.error(`Failed to start or error in child process for ${taskName}:`, error);
+      // lastCompletion is not updated on error
+      taskRunningFlags[taskName] = false;
+      // Timestamps with lastAttemptedStart are already written
+    });
   } else {
     const timeToWaitMs = intervalMs - timeSinceLastAttempt;
     const secondsToWait = Math.ceil(timeToWaitMs / 1000);
@@ -118,23 +136,23 @@ async function runTaskIfDue(taskName, taskFunction, intervalMs) {
 }
 
 setInterval(() => {
-  runTaskIfDue(WAZE_TASK_NAME, Waze.fetchWazeAlerts, WAZE_UPDATE_INTERVAL_MS).catch((err) => Log.error(`Error in scheduled execution wrapper for ${WAZE_TASK_NAME}:`, err));
+  runTaskIfDue(WAZE_TASK_NAME, WAZE_RUNNER_PATH, WAZE_UPDATE_INTERVAL_MS).catch((err) => Log.error(`Error in scheduled execution wrapper for ${WAZE_TASK_NAME}:`, err));
 }, WAZE_UPDATE_INTERVAL_MS);
 
 setInterval(() => {
-  runTaskIfDue(GRID_TASK_NAME, Grid.updateGrids, GRID_UPDATE_INTERVAL_MS).catch((err) => Log.error(`Error in scheduled execution wrapper for ${GRID_TASK_NAME}:`, err));
+  runTaskIfDue(GRID_TASK_NAME, GRID_RUNNER_PATH, GRID_UPDATE_INTERVAL_MS).catch((err) => Log.error(`Error in scheduled execution wrapper for ${GRID_TASK_NAME}:`, err));
 }, GRID_UPDATE_INTERVAL_MS);
 
 async function setup() {
   Log.info("Running initial setup checks for tasks...");
-  await runTaskIfDue(WAZE_TASK_NAME, Waze.fetchWazeAlerts, WAZE_UPDATE_INTERVAL_MS);
-  await runTaskIfDue(GRID_TASK_NAME, Grid.updateGrids, GRID_UPDATE_INTERVAL_MS);
+  await runTaskIfDue(WAZE_TASK_NAME, WAZE_RUNNER_PATH, WAZE_UPDATE_INTERVAL_MS);
+  await runTaskIfDue(GRID_TASK_NAME, GRID_RUNNER_PATH, GRID_UPDATE_INTERVAL_MS);
   Log.info("Initial setup checks complete.");
 }
 
 async function main() {
   await setup();
-  Server.startServer();
+  Server.startServer(); // Server runs in the main process
 }
 
 main().catch((error) => {
