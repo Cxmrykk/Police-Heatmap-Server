@@ -4,7 +4,7 @@ const Axios = require("axios");
 const config = require("./config");
 const Log = require("./log");
 
-// Configuration (now from config module)
+// Configuration
 const MAX_ALERTS = config.WAZE_MAX_ALERTS;
 const AREA_TOP = config.WAZE_AREA_TOP;
 const AREA_BOTTOM = config.WAZE_AREA_BOTTOM;
@@ -29,20 +29,46 @@ function Area(top, bottom, left, right) {
   this.right = right;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function getData(top, bottom, left, right) {
-  try {
-    const response = await Axios.get(`https://www.waze.com/live-map/api/georss?top=${top}&bottom=${bottom}&left=${left}&right=${right}&env=row&types=alerts`);
-    return response.data;
-  } catch (error) {
-    Log.error(`API Request Error: ${error.message} for area T:${top},B:${bottom},L:${left},R:${right}`);
-    return null;
+  const retryDelays = [5000, 10000, 30000]; // 5s, 10s, 30s
+  let attempts = 0;
+
+  while (attempts <= retryDelays.length) {
+    try {
+      const response = await Axios.get(
+        `https://www.waze.com/live-map/api/georss?top=${top}&bottom=${bottom}&left=${left}&right=${right}&env=row&types=alerts`,
+        { timeout: 10000 } // Added timeout to prevent hanging
+      );
+      return response.data;
+    } catch (error) {
+      const isForbidden = error.response && error.response.status === 403;
+      
+      if (isForbidden && attempts < retryDelays.length) {
+        const delay = retryDelays[attempts];
+        Log.warn(`Waze API 403 Forbidden. Retrying in ${delay / 1000}s... (Attempt ${attempts + 1}/${retryDelays.length})`);
+        await sleep(delay);
+        attempts++;
+      } else {
+        const reason = isForbidden ? "Max retries reached" : error.message;
+        Log.error(`API Request Failed: ${reason} for area T:${top},B:${bottom},L:${left},R:${right}. Skipping chunk.`);
+        return null;
+      }
+    }
   }
+  return null;
 }
 
 function splitData(top, bottom, left, right) {
   const midVertical = left + (right - left) / 2;
   const midHorizontal = bottom + (top - bottom) / 2;
-  return [new Area(top, midHorizontal, left, midVertical), new Area(top, midHorizontal, midVertical, right), new Area(midHorizontal, bottom, left, midVertical), new Area(midHorizontal, bottom, midVertical, right)];
+  return [
+    new Area(top, midHorizontal, left, midVertical),
+    new Area(top, midHorizontal, midVertical, right),
+    new Area(midHorizontal, bottom, left, midVertical),
+    new Area(midHorizontal, bottom, midVertical, right),
+  ];
 }
 
 const insertAlertStmt = db.prepare(`INSERT OR IGNORE INTO alerts (uuid, pubMillis, latitude, longitude, confidence, reliability) VALUES (?, ?, ?, ?, ?, ?)`);
@@ -71,9 +97,11 @@ async function fetchWazeAlerts() {
   while (queue.length > 0) {
     const currentArea = queue.pop();
     const data = await getData(currentArea.top, currentArea.bottom, currentArea.left, currentArea.right);
-    if (!data) continue;
+    
+    if (!data) continue; // getData now returns null only after exhaustion or non-403 errors
+    
     if (data.error) {
-      Log.error(`Waze API Error: ${data.error}`);
+      Log.error(`Waze API Error structure: ${JSON.stringify(data.error)}`);
       continue;
     }
     if (!data.alerts || !Array.isArray(data.alerts)) continue;
@@ -88,7 +116,7 @@ async function fetchWazeAlerts() {
     }
 
     if (QUERY_DELAY_MS > 0 && queue.length > 0) {
-      await new Promise((resolve) => setTimeout(resolve, QUERY_DELAY_MS));
+      await sleep(QUERY_DELAY_MS);
     }
   }
 
